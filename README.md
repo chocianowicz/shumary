@@ -92,6 +92,26 @@ shumary cache clear <slug> --stage mood   # re-run only the mood stage
 shumary lint --json             # machine-readable output
 ```
 
+### Speed tuning
+
+By default, shumary uses `whisper large` — maximum quality. The per-stage timing breakdown
+printed at the end of every run (e.g. `transcribe 13m 02s · diarize 5s · align <1s · …`)
+shows exactly where time goes so you can make an informed trade-off.
+
+| Flag / Env var | Speed-up | Quality impact |
+|---|---|---|
+| `--fast` | ~25–35% faster Whisper | Tiny — greedy decode on `large` is nearly identical for clean speech |
+| `--model turbo` | ~5–8× faster Whisper | Minor — may miss tricky phrasing on noisy audio |
+| `--model medium` | ~3× faster Whisper | Moderate — noticeable on dense technical content |
+| `SHUMARY_WHISPER_MODEL=turbo` | same as `--model turbo` | same |
+
+Recommended fast path for casual recordings:
+```bash
+shumary ingest --fast --model turbo my-recording.m4a
+```
+
+Keep `--model large` (the default) for anything where word-level accuracy matters.
+
 ---
 
 ## Architecture
@@ -141,5 +161,5 @@ shumary/
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `HF_TOKEN` | No | — | Hugging Face token for speaker diarization |
-| `SHUMARY_WHISPER_MODEL` | No | `large` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) |
+| `SHUMARY_WHISPER_MODEL` | No | `large` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`/`turbo`) |
 | `SHUMARY_WHISPER_DEVICE` | No | auto | Force device: `cpu`, `mps`, or `cuda` |

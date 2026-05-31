@@ -26,4 +26,6 @@ def archived_audio_path_for(audio: Path) -> Path:
 
 
 def relative_to_repo(p: Path) -> Path:
+    if not p.is_absolute():
+        return p
     return p.relative_to(REPO_ROOT)

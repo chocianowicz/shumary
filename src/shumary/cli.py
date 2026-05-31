@@ -46,17 +46,27 @@ def ingest(
     path: Annotated[Optional[Path], typer.Argument(help="Audio file to ingest, or omit for all of Inbox/")] = None,
     force: bool = typer.Option(False, "--force", "-f", help="Re-run all stages, ignoring cache."),
     no_diarize: bool = typer.Option(False, "--no-diarize", help="Skip speaker diarization."),
-    model: str = typer.Option(WHISPER_MODEL, "--model", "-m", help="Whisper model size."),
+    fast: bool = typer.Option(False, "--fast", help="Greedy Whisper decode (beam_size=1, single temperature). ~25-35% faster, minimal quality trade-off on clean speech."),
+    model: str = typer.Option(
+        WHISPER_MODEL,
+        "--model", "-m",
+        help=(
+            "Whisper model size. Options: tiny, base, small, medium, large (default), turbo. "
+            "'turbo' is ~5-8x faster than 'large' with minor quality drift on hard audio. "
+            "'medium' is ~3x faster with more drift. "
+            "Combine with --fast for maximum speed: --model turbo --fast."
+        ),
+    ),
 ) -> None:
     """Transcribe audio files and save rich markdown transcripts."""
     from shumary import pipeline
 
     if path is None:
-        pipeline.process_inbox(force=force, no_diarize=no_diarize, model_name=model)
+        pipeline.process_inbox(force=force, no_diarize=no_diarize, fast=fast, model_name=model)
     else:
         if not path.is_absolute():
             path = REPO_ROOT / path
-        pipeline.process_file(path, force=force, no_diarize=no_diarize, model_name=model)
+        pipeline.process_file(path, force=force, no_diarize=no_diarize, fast=fast, model_name=model)
 
 
 # ── shumary status ─────────────────────────────────────────────────────────────
