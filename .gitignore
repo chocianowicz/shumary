@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Pipeline stage cache — per-recording intermediate results
+.cache/
+
+# ── Personal / sensitive content ──────────────────────────────────────────────
+# None of this leaves this machine.
+
+# Audio files — Inbox drop zone and archived originals
+Inbox/*
+!Inbox/.gitkeep
+raw/audio/*
+!raw/audio/.gitkeep
+
+# Transcripts — Whisper output, contains verbatim speech
+raw/transcripts/*
+!raw/transcripts/.gitkeep
+
+# Assets — recordings-adjacent attachments
+raw/assets/*
+!raw/assets/.gitkeep
+
+# Wiki — personal knowledge base built from the transcripts
+wiki/*
+!wiki/.gitkeep
+
+# HF / Whisper model caches
+.huggingface/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Secrets
+.env
+.env.local
