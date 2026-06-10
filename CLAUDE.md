@@ -146,8 +146,11 @@ mood_signals:
 
 ## Language Policy
 
-- The wiki language follows the source: if a recording is in Russian, the source page and content
-  extracted from it may be in Russian.
+- **Source Language Matching**: The created wiki page must strictly match the language of the source recording/audio.
+  - If the audio is in Polish -> create/summarize in Polish.
+  - If the audio is in Russian -> create/summarize in Russian.
+  - If the audio is in English -> create/summarize in English.
+  - etc. (always match the primary language of the source transcript).
 - `overview.md`, `index.md`, and `log.md` are always in English.
 - Use the language that makes the content most useful; don't force translation where it loses nuance.
 - Concept and entity pages should be bilingual (English title, content in source language where natural).
@@ -344,5 +347,5 @@ When transcript quality is low or a claim is uncertain:
 - The emergent structure policy means you own the shape of the wiki. When 3-4 related pages cluster
   together, think about whether they belong in a subdir. When a subdir grows stale or mismatched,
   restructure and log it. Keep the structure serving the content, not the other way around.
-- The user's recordings are in EN, RU, and PL — often mixed within one recording. Match the page
-  language to the source content; don't force translation where it loses nuance.
+- The user's recordings are in EN, RU, and PL — often mixed within one recording. Strictly match the page
+  language to the source audio/transcript language (Polish to Polish, Russian to Russian, etc.) to capture all the nuance.
