@@ -1,8 +1,14 @@
 # Shumary
 
-> A personal LLM-maintained wiki fed by audio recordings.
+> Audio → detailed markdown transcripts. Speaker diarization, behavioral mood signals, and
+> acoustic prosody — fast, accurate, fully local.
 
-Drop an audio file into `Inbox/`, run `shumary ingest`, and watch your knowledge base grow.
+```bash
+shumary transcribe my-recording.m4a
+```
+
+produces `my-recording.md`: a timestamped, per-speaker transcript with a structured frontmatter
+block covering speaking rate, pauses, fillers, turn-taking dynamics, and voice/pitch signals.
 
 ---
 
@@ -35,7 +41,17 @@ pyannote.audio requires a free Hugging Face account:
    source ~/.zshrc
    ```
 
-> **No token?** Transcription and mood analysis still work. Only speaker detection is skipped.
+> **No token?** Transcription and mood analysis still work. Only speaker detection is skipped
+> (a tokenless `resemblyzer` fallback handles diarization instead — see below).
+
+> **Privacy note:** your audio never leaves the machine. The HF token is only used to download
+> the pyannote model weights once; all diarization runs locally afterwards. Set `HF_HUB_OFFLINE=1`
+> (see [Environment Variables](#environment-variables)) once the weights are cached to guarantee
+> no network calls are made on subsequent runs.
+
+> **If pyannote fails at runtime** (e.g. unsupported audio, model load issues), shumary
+> automatically falls back to the tokenless `resemblyzer` backend rather than skipping
+> diarization entirely. The transcript frontmatter records which backend actually ran.
 
 ### 4. Check your setup
 
@@ -43,29 +59,18 @@ pyannote.audio requires a free Hugging Face account:
 shumary doctor
 ```
 
-### 5. Ingest an audio file
+### 5. Transcribe
 
 ```bash
-cp ~/Desktop/my-recording.m4a Inbox/
-shumary ingest
+shumary transcribe my-recording.m4a
 ```
 
-This transcribes the audio (Whisper), detects speakers (pyannote), analyzes behavioral signals
-(pauses, speaking rate, fillers), and saves a rich markdown transcript to `raw/transcripts/`.
-
-### 6. Ingest the transcript into the wiki
-
-Open this directory in a new Claude Code session and say:
-
-> *"Please ingest `raw/transcripts/2026-05-31-my-recording.md` into the wiki."*
-
-Claude reads `CLAUDE.md`, then reads the transcript and updates the wiki — creating or updating
-pages, cross-references, the index, and the log. The wiki (`wiki/`) is the compounding artifact.
-
-### 7. Browse in Obsidian
+Writes `my-recording.md` next to the input by default. Use `-o` to choose a different path or
+directory, or point at a whole directory to batch-process every audio file in it:
 
 ```bash
-shumary open
+shumary transcribe my-recording.m4a -o transcripts/session.md
+shumary transcribe ./recordings/ -o ./transcripts/
 ```
 
 ---
@@ -74,10 +79,7 @@ shumary open
 
 | Command | Description |
 |---------|-------------|
-| `shumary ingest [PATH]` | Transcribe one audio file or all of `Inbox/` |
-| `shumary status` | Show pending transcripts, wiki stats, recent log entries |
-| `shumary lint` | Run structural health checks on the wiki |
-| `shumary open [TARGET]` | Open `wiki/` in Obsidian (default) |
+| `shumary transcribe PATH` | Transcribe one audio file, or every audio file in a directory |
 | `shumary cache list [SLUG]` | Show pipeline cache state |
 | `shumary cache clear [SLUG]` | Clear pipeline cache (all or one file, all or one stage) |
 | `shumary doctor` | Check system deps, models, tokens |
@@ -85,11 +87,12 @@ shumary open
 ### Useful flags
 
 ```bash
-shumary ingest --force          # re-run all stages, ignoring cache
-shumary ingest --no-diarize     # skip speaker diarization
-shumary ingest --model medium   # use a different Whisper model
-shumary cache clear <slug> --stage mood   # re-run only the mood stage
-shumary lint --json             # machine-readable output
+shumary transcribe rec.m4a --force          # re-run all stages, ignoring cache
+shumary transcribe rec.m4a --no-diarize     # skip speaker diarization
+shumary transcribe rec.m4a --solo           # single-speaker recording, skip diarization
+shumary transcribe rec.m4a --model medium   # use a different Whisper model
+shumary transcribe rec.m4a --date 2026-05-31   # override recording date detection
+shumary cache clear <slug> --stage mood     # re-run only the mood stage
 ```
 
 ### Speed tuning
@@ -107,46 +110,35 @@ shows exactly where time goes so you can make an informed trade-off.
 
 Recommended fast path for casual recordings:
 ```bash
-shumary ingest --fast --model turbo my-recording.m4a
+shumary transcribe my-recording.m4a --fast --model turbo
 ```
 
 Keep `--model large` (the default) for anything where word-level accuracy matters.
 
 ---
 
-## Architecture
+## What's in the output
 
-Three layers (Karpathy's LLM Wiki pattern):
+Every transcript is one self-contained markdown file:
 
-**1. Raw sources** — immutable originals in `raw/`. The pipeline reads audio and writes transcripts
-here. Nothing is ever deleted or modified after it lands in `raw/`.
+- **YAML frontmatter** — title, date, duration, language, word count, per-speaker breakdown,
+  behavioral mood signals (speaking rate, pauses, fillers, inferred state), turn-taking
+  interaction metrics (for multi-speaker recordings), and acoustic prosody (pitch, energy, voice
+  quality) when `librosa`/`praat-parselmouth` are installed.
+- **Speakers** — detected speaker count and talk-time breakdown.
+- **Behavioral / Mood Signals** — speaking rate, pause patterns, filler words, repeated phrases;
+  always hedged as `(uncertain)` hypotheses, never diagnoses.
+- **Interaction Dynamics** — turn counts, response latency, interruptions, talk share over time
+  (multi-speaker only).
+- **Voice / Prosody** — pitch baseline/variability, energy dynamics, jitter/shimmer (when
+  available).
+- **Full Transcript** — timestamped, speaker-attributed prose with inline pause markers and
+  low-confidence/near-silence annotations.
+- **Plain Text** — the raw transcript text (optional, `--no-plain-text` to omit).
 
-**2. The wiki** — `wiki/` is LLM-owned markdown. Claude Code writes and maintains all pages based
-on ingested transcripts. The wiki compounds over time: cross-references, entity pages, concept
-summaries, an evolving overview. You read it; the LLM writes it. Browse with Obsidian.
-
-**3. The schema** — `CLAUDE.md` is Claude's operating manual. It defines conventions, workflows
-(ingest, query, lint), mood signal interpretation, and the emergent structure policy (no
-predefined subdirs — Claude decides page layout as the wiki grows).
-
----
-
-## Directory Structure
-
-```
-shumary/
-├── CLAUDE.md                  ← Wiki agent operating manual
-├── Inbox/                     ← Drop audio files here
-├── raw/
-│   ├── audio/                 ← Archived originals (gitignored)
-│   ├── transcripts/           ← Rich markdown transcripts (committed)
-│   └── assets/                ← Images and attachments
-├── wiki/                      ← LLM-maintained knowledge base (Obsidian vault)
-│   ├── index.md               ← Master catalog
-│   ├── log.md                 ← Append-only activity log
-│   └── overview.md            ← High-level synthesis
-└── src/shumary/               ← Python package (the transcription pipeline)
-```
+All stages run locally: Whisper (mlx/faster/openai backend, auto-detected) for transcription,
+pyannote.audio (or a tokenless resemblyzer fallback) for diarization. No LLM calls, no network
+access beyond the one-time model download.
 
 ---
 
@@ -160,6 +152,8 @@ shumary/
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `HF_TOKEN` | No | — | Hugging Face token for speaker diarization |
+| `HF_TOKEN` | No | — | Hugging Face token for speaker diarization (used only to download model weights once) |
+| `HF_HUB_OFFLINE` | No | — | Set to `1` to force Hugging Face Hub into offline mode. Once the pyannote weights are cached locally (`~/.cache/huggingface/hub`), no network access is needed at all — set this for guaranteed-offline, privacy-sensitive runs. `shumary doctor` suggests this once it detects the weights are already cached. |
 | `SHUMARY_WHISPER_MODEL` | No | `large` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`/`turbo`) |
 | `SHUMARY_WHISPER_DEVICE` | No | auto | Force device: `cpu`, `mps`, or `cuda` |
+| `SHUMARY_CACHE_DIR` | No | `~/.cache/shumary` | Override the pipeline's per-stage cache directory |

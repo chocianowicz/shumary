@@ -1,31 +1,34 @@
-"""Canonical path constants derived from the repo root."""
+"""Cache and output path helpers."""
 
+import os
 from pathlib import Path
 
-# Resolve repo root relative to this file: src/shumary/paths.py → ../../..
-REPO_ROOT: Path = Path(__file__).parent.parent.parent
 
-INBOX: Path = REPO_ROOT / "Inbox"
-RAW_AUDIO: Path = REPO_ROOT / "raw" / "audio"
-RAW_TRANSCRIPTS: Path = REPO_ROOT / "raw" / "transcripts"
-RAW_ASSETS: Path = REPO_ROOT / "raw" / "assets"
-WIKI: Path = REPO_ROOT / "wiki"
-CACHE: Path = REPO_ROOT / ".cache"
+def _default_cache_root() -> Path:
+    override = os.environ.get("SHUMARY_CACHE_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "shumary"
+
+
+CACHE: Path = _default_cache_root()
 
 
 def cache_dir_for(slug: str) -> Path:
     return CACHE / slug
 
 
-def transcript_path_for(date_str: str, slug: str) -> Path:
-    return RAW_TRANSCRIPTS / f"{date_str}-{slug}.md"
+def output_path_for(audio: Path, output: Path | None = None) -> Path:
+    """Where the rendered transcript lands.
 
-
-def archived_audio_path_for(audio: Path) -> Path:
-    return RAW_AUDIO / audio.name
-
-
-def relative_to_repo(p: Path) -> Path:
-    if not p.is_absolute():
-        return p
-    return p.relative_to(REPO_ROOT)
+    Default: `<audio-stem>.md` next to the input. `output` may be an existing
+    directory (transcript goes inside it, named after the audio) or an explicit
+    file path.
+    """
+    if output is None:
+        return audio.with_suffix(".md")
+    if output.is_dir():
+        return output / f"{audio.stem}.md"
+    return output

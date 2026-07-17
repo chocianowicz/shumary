@@ -2,8 +2,10 @@
 
 Strategy:
   1. Try pyannote (best accuracy) if HF_TOKEN is available.
-  2. Fall back to resemblyzer + agglomerative clustering (tokenless, ~5s).
-  3. Return None if neither is available.
+  2. If pyannote loads but fails at runtime (e.g. a bad/corrupt audio file),
+     fall back to resemblyzer instead of giving up.
+  3. Fall back to resemblyzer + agglomerative clustering (tokenless, ~5s).
+  4. Return None if neither is available.
 
 Speaker count estimation uses silhouette score (not gap heuristic) because
 gap heuristic is unreliable on long recordings where within-speaker variance
@@ -12,16 +14,25 @@ grows and creates false gaps in the dendrogram.
 
 from pathlib import Path
 
-from shumary.models import Turn, SpeakerStat, SpeakerStats
+from shumary.config import SOLO_SILHOUETTE
+from shumary.models import Turn, DiarizationResult, SpeakerStat, SpeakerStats
 from shumary.modelhub import diarization_pipeline, resemblyzer_encoder
 
 
-def run(audio: Path) -> list[Turn] | None:
-    """Return speaker turns or None on any failure."""
+def run(audio: Path) -> DiarizationResult | None:
+    """Return speaker turns plus the backend that produced them, or None on failure."""
     pipeline = diarization_pipeline()
     if pipeline is not None:
-        return _run_pyannote(audio, pipeline)
-    return _run_resemblyzer(audio)
+        turns = _run_pyannote(audio, pipeline)
+        if turns is not None:
+            return DiarizationResult(turns=tuple(turns), backend="pyannote")
+        # pyannote loaded but failed at runtime — fall through to resemblyzer
+        # instead of giving up entirely.
+        print("  ↪  falling back to resemblyzer")
+    turns = _run_resemblyzer(audio)
+    if turns is not None:
+        return DiarizationResult(turns=tuple(turns), backend="resemblyzer")
+    return None
 
 
 # ── pyannote backend ───────────────────────────────────────────────────────────
@@ -32,9 +43,12 @@ def _run_pyannote(audio: Path, pipeline) -> list[Turn] | None:
     except Exception as exc:
         print(f"  ⚠  pyannote diarization failed: {exc}")
         return None
+    # pyannote.audio 4.x returns a DiarizeOutput wrapper; the Annotation lives
+    # at .speaker_diarization. 3.x returns the Annotation directly.
+    annotation = getattr(diarization, "speaker_diarization", diarization)
     turns = [
         Turn(start=turn.start, end=turn.end, speaker=speaker)
-        for turn, _, speaker in diarization.itertracks(yield_label=True)
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
     ]
     return turns if turns else None
 
@@ -89,12 +103,59 @@ def _run_resemblyzer(audio: Path) -> list[Turn] | None:
     times = [float((sl.start + sl.stop) / 2 / sr) for sl in wav_splits]
 
     Z = linkage(E, method="ward")
+
+    # Spec 4.3 — single-speaker decision rule. A weak forced 2-way split means
+    # there's really only one voice; avoid forcing a spurious k>=2 split.
+    sil2 = _silhouette_for_k(E, Z, 2)
+    if sil2 is not None and sil2 < SOLO_SILHOUETTE:
+        print(
+            f"  resemblyzer: weak 2-way split (silhouette {sil2:.2f}) "
+            "→ treating as single speaker"
+        )
+        return [Turn(start=max(0.0, times[0] - _WINDOW_SEC / 2),
+                      end=times[-1] + _WINDOW_SEC / 2,
+                      speaker="SPEAKER_00")]
+
     n_speakers = _estimate_speakers(E, Z)
     print(f"  resemblyzer: estimated {n_speakers} speaker(s)")
 
     labels = fcluster(Z, n_speakers, criterion="maxclust")
     turns = _labels_to_turns(labels, times)
     return turns if turns else None
+
+
+def _subsample(E, Z, k: int):
+    """Evenly-spaced subsample of E (preserves temporal distribution) plus its
+    fcluster labels for k clusters. Returns (E_sub, labels_sub) or (None, None)
+    if subsampling left a cluster empty."""
+    import numpy as np
+    from scipy.cluster.hierarchy import fcluster  # type: ignore[import-untyped]
+
+    n = len(E)
+    if n > _SUBSAMPLE_N:
+        idx = np.linspace(0, n - 1, _SUBSAMPLE_N, dtype=int)
+        E_sub = E[idx]
+    else:
+        idx = np.arange(n)
+        E_sub = E
+
+    labels_full = fcluster(Z, k, criterion="maxclust")
+    labels_sub = labels_full[idx]
+
+    if len(np.unique(labels_sub)) < k:
+        return None, None
+    return E_sub, labels_sub
+
+
+def _silhouette_for_k(E, Z, k: int) -> float | None:
+    """Mean silhouette score for a forced k-way split, or None if too few
+    points to evaluate (matches the `n < _MIN_SPEAKERS * 4` guard below)."""
+    if len(E) < _MIN_SPEAKERS * 4:
+        return None
+    E_sub, labels_sub = _subsample(E, Z, k)
+    if E_sub is None:
+        return None
+    return _mean_silhouette(E_sub, labels_sub)
 
 
 def _estimate_speakers(E, Z, max_k: int = _MAX_SPEAKERS) -> int:

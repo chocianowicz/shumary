@@ -1,7 +1,7 @@
 [project]
 name = "shumary"
 version = "0.1.0"
-description = "Personal LLM-maintained wiki fed by audio recordings."
+description = "Audio to detailed markdown transcripts — diarization, mood, and prosody signals, fast and local."
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "openai-whisper>=20240101",
@@ -11,7 +11,6 @@ dependencies = [
     "typer>=0.9.0",
     "rich>=13.0",
     "pyyaml>=6.0",
-    "python-frontmatter>=1.0",
     "resemblyzer>=0.1.1.dev0",
     "scipy>=1.10",
 ]
@@ -22,6 +21,24 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
+]
+# Faster transcription backends (Phase 3 — Spec 3). openai-whisper (the
+# fallback) is in the base dependencies above. Install whichever applies:
+#   - mlx-whisper: Apple Silicon only, ~5-10x faster than openai-whisper.
+#   - faster-whisper: CTranslate2-based, ~4x faster, built-in VAD.
+mlx = [
+    "mlx-whisper>=0.4.0",
+]
+faster = [
+    "faster-whisper>=1.0.0",
+]
+# Acoustic prosody extraction (Phase 7 — Spec 7): pitch, energy, and voice-
+# quality (jitter/shimmer) features computed on the Phase 3 WAV. The
+# `prosody` stage degrades gracefully (skips, with a warning) when these are
+# not installed.
+prosody = [
+    "librosa>=0.10.0",
+    "praat-parselmouth>=0.4.0",
 ]
 
 [project.scripts]

@@ -12,6 +12,28 @@ WHISPER_DEVICE: str | None = os.environ.get("SHUMARY_WHISPER_DEVICE")
 DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 HF_TOKEN_ENVVARS = ("HF_TOKEN", "HUGGINGFACE_TOKEN")
 
+# ── Diarization — single-speaker decision rule (Spec 4.3) ─────────────────────
+# Resemblyzer path: if the silhouette score for a forced 2-way split is below
+# this threshold, treat the recording as a single speaker instead of forcing
+# a (spurious) k>=2 split.
+#
+# Tuned 2026-06-10 against real recordings (same embedding + silhouette(k=2)
+# code path as the production rule):
+#   - solo sample (~5.18 min, single speaker, turns >=3s cut+concatenated
+#     from a real recording): sil2 = 0.1423
+#   - duo sample (~58 min, two speakers): sil2 = 0.3153
+#
+# The default 0.10 failed the solo<threshold check (0.1423 >= 0.10), so per
+# spec it was raised to the geometric mean of the two observed scores:
+# sqrt(0.1423 * 0.3153) ≈ 0.2118. NOTE: at this threshold the duo recording
+# (0.3153) does not clear the spec's 2x margin (>= 0.4237) — the two
+# observed scores are only ~2.2x apart, not the required 4x. Geometric mean
+# is the spec's prescribed adjustment for a failed margin; a wider margin
+# would require either a different feature/clustering approach or more
+# diverse tuning samples (out of scope for this task).
+
+SOLO_SILHOUETTE: float = 0.2118
+
 # ── Audio ──────────────────────────────────────────────────────────────────────
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset(
@@ -27,20 +49,88 @@ SLOW_RATE: float = 1.8
 FAST_RATE: float = 3.5
 BASELINE_RATE: float = 2.5
 
-# ── Filler words ───────────────────────────────────────────────────────────────
-# Hand-curated trilingual set. English is always merged in regardless of source language.
+# ── Interaction metrics (Spec 5 / 5.2) ──────────────────────────────────────────
+# Consecutive same-speaker turns separated by less than this are merged into
+# one utterance before computing turn/latency/talk-share metrics.
+UTTERANCE_MERGE_GAP: float = 1.0
 
-FILLER_WORDS: dict[str, set[str]] = {
+# Minimum raw-turn intersection (seconds) between different speakers to count
+# as an overlap (pyannote backend only).
+OVERLAP_MIN: float = 0.1
+
+# B "yields" an interruption to A if A's turn ends within this many seconds
+# after B's turn starts (and B started strictly inside A's turn).
+INTERRUPT_YIELD_SEC: float = 2.0
+
+# Response latencies above this are treated as topic breaks / silence
+# ("long_gaps") rather than a response, and excluded from the
+# median/p90 latency stats.
+LATENCY_CAP_SEC: float = 30.0
+
+# ── Hallucination post-filter (Spec 3-VAD) ───────────────────────────────────────
+# Applies to the openai and mlx backends (faster-whisper has built-in vad_filter).
+# A segment is dropped when no_speech_prob >= this threshold AND its normalized
+# text repeats the previous segment's AND its duration >= 2.0s.
+
+HALLUCINATION_NO_SPEECH: float = 0.5
+HALLUCINATION_MIN_DURATION_SEC: float = 2.0
+
+# ── Prosody extraction (Spec 7 / Phase 7.1) ──────────────────────────────────────
+# Segments shorter than this are skipped entirely (too short for stable pitch
+# / voice-quality estimates).
+PROSODY_MIN_SEGMENT_SEC: float = 1.0
+
+# librosa.pyin speech-band parameters.
+PROSODY_F0_FMIN: float = 65.0
+PROSODY_F0_FMAX: float = 400.0
+PROSODY_FRAME_LENGTH: int = 2048
+
+# A segment needs at least this many voiced pyin frames for its F0 fields to
+# be populated; otherwise they're None.
+PROSODY_MIN_VOICED_FRAMES: int = 10
+
+# ── Filler words (finding B6) ───────────────────────────────────────────────────
+# Split into two lexicons per language:
+#  - HESITATIONS: pure non-lexical fillers (uh, um, er, эм, eee, ...) — never
+#    ordinary words, always indicate a pause/hesitation when spoken.
+#  - DISCOURSE_MARKERS: lexical items that *can* function as fillers/hedges
+#    (like, you know, ну, вот, это, no, właśnie, ...) but are also ordinary
+#    words — counted separately so they don't get conflated with hesitations.
+#
+# Per finding B7 (mixed-language recordings), all three languages (en, ru, pl)
+# are always merged regardless of the detected language — see mood.py's
+# `_filler_pattern` / `_hesitation_pattern` / `_discourse_marker_pattern`.
+
+HESITATIONS: dict[str, set[str]] = {
     "en": {
         "uh", "um", "uhh", "umm", "er", "err", "hmm", "hm", "ugh",
+    },
+    "ru": {
+        "эм", "эхм", "ммм",
+    },
+    "pl": {
+        "eee", "yyy", "ehh", "yhm",
+    },
+}
+
+DISCOURSE_MARKERS: dict[str, set[str]] = {
+    "en": {
         "like", "basically", "literally", "actually", "you know",
     },
     "ru": {
-        "ну", "эм", "эхм", "а", "вот", "это", "значит", "короче",
+        "ну", "вот", "это", "значит", "короче",
         "как бы", "типа", "собственно", "в общем",
     },
     "pl": {
-        "eee", "yyy", "no", "właśnie", "tak", "jakby",
-        "znaczy", "bo", "kurde", "no to",
+        "no", "właśnie", "jakby",
+        "znaczy", "no to",
     },
+}
+
+# Backward/continuity alias: global `filler_word_count` keeps meaning
+# hesitations + discourse markers combined. Some code/tests may still refer
+# to the merged lexicon by language.
+FILLER_WORDS: dict[str, set[str]] = {
+    lang: HESITATIONS.get(lang, set()) | DISCOURSE_MARKERS.get(lang, set())
+    for lang in set(HESITATIONS) | set(DISCOURSE_MARKERS)
 }

@@ -9,50 +9,17 @@ runner = CliRunner()
 def test_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "ingest" in result.output
-    assert "status" in result.output
-    assert "lint" in result.output
+    assert "transcribe" in result.output
     assert "doctor" in result.output
 
 
-def test_ingest_help():
-    result = runner.invoke(app, ["ingest", "--help"])
+def test_transcribe_help():
+    result = runner.invoke(app, ["transcribe", "--help"])
     assert result.exit_code == 0
     assert "--force" in result.output
     assert "--no-diarize" in result.output
     assert "--model" in result.output
-
-
-def test_status_runs(tmp_path, monkeypatch):
-    monkeypatch.setattr("shumary.paths.INBOX", tmp_path / "Inbox")
-    monkeypatch.setattr("shumary.paths.RAW_TRANSCRIPTS", tmp_path / "transcripts")
-    monkeypatch.setattr("shumary.paths.WIKI", tmp_path / "wiki")
-    (tmp_path / "Inbox").mkdir()
-    (tmp_path / "transcripts").mkdir()
-    (tmp_path / "wiki").mkdir()
-    result = runner.invoke(app, ["status"])
-    assert result.exit_code == 0
-
-
-def test_lint_runs(tmp_path, monkeypatch):
-    monkeypatch.setattr("shumary.paths.WIKI", tmp_path / "wiki")
-    monkeypatch.setattr("shumary.paths.RAW_TRANSCRIPTS", tmp_path / "transcripts")
-    (tmp_path / "wiki").mkdir()
-    (tmp_path / "transcripts").mkdir()
-    result = runner.invoke(app, ["lint"])
-    assert result.exit_code == 0
-
-
-def test_lint_json_output(tmp_path, monkeypatch):
-    monkeypatch.setattr("shumary.paths.WIKI", tmp_path / "wiki")
-    monkeypatch.setattr("shumary.paths.RAW_TRANSCRIPTS", tmp_path / "transcripts")
-    (tmp_path / "wiki").mkdir()
-    (tmp_path / "transcripts").mkdir()
-    result = runner.invoke(app, ["lint", "--json"])
-    assert result.exit_code == 0
-    import json
-    parsed = json.loads(result.output)
-    assert isinstance(parsed, list)
+    assert "--output" in result.output
 
 
 def test_cache_list_empty(tmp_path, monkeypatch):
@@ -61,7 +28,69 @@ def test_cache_list_empty(tmp_path, monkeypatch):
     assert result.exit_code == 0
 
 
+def test_cache_list_shows_fingerprint_column(tmp_path, monkeypatch):
+    cache_dir = tmp_path / ".cache"
+    monkeypatch.setattr("shumary.paths.CACHE", cache_dir)
+    monkeypatch.setattr("shumary.cache.cache_dir_for", lambda slug: cache_dir / slug)
+
+    from shumary import cache as cache_mod
+
+    audio = tmp_path / "memo.m4a"
+    audio.write_bytes(b"audio-bytes")
+    cache_mod.ensure_manifest("memo", audio, "turbo", True)
+    cache_mod.write("memo", "whisper", {})
+
+    # Legacy slug: stage file but no manifest.
+    cache_mod.write("legacy-slug", "whisper", {})
+
+    result = runner.invoke(app, ["cache", "list"])
+
+    assert result.exit_code == 0
+    assert "turbo --fast" in result.output
+    assert "v1/legacy" in result.output
+
+
+def test_cache_clear_stage_clears_descendants(tmp_path, monkeypatch):
+    cache_dir = tmp_path / ".cache"
+    monkeypatch.setattr("shumary.paths.CACHE", cache_dir)
+    monkeypatch.setattr("shumary.cache.cache_dir_for", lambda slug: cache_dir / slug)
+
+    from shumary import cache as cache_mod
+    cache_mod.write("memo", "whisper", {})
+    cache_mod.write("memo", "align", {})
+    cache_mod.write("memo", "mood", {})
+    cache_mod.mark_done("memo")
+
+    result = runner.invoke(app, ["cache", "clear", "memo", "--stage", "whisper"])
+
+    assert result.exit_code == 0
+    assert not cache_mod.is_cached("memo", "whisper")
+    assert not cache_mod.is_cached("memo", "align")
+    assert not cache_mod.is_cached("memo", "mood")
+    assert not cache_mod.is_done("memo")
+
+
 def test_doctor_runs():
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "ffprobe" in result.output
+
+
+def test_transcribe_missing_file_exits_nonzero(tmp_path):
+    missing = tmp_path / "does-not-exist.m4a"
+    result = runner.invoke(app, ["transcribe", str(missing)])
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+def test_transcribe_invalid_date_exits_nonzero(tmp_path):
+    missing = tmp_path / "does-not-exist.m4a"
+    result = runner.invoke(app, ["transcribe", str(missing), "--date", "not-a-date"])
+    assert result.exit_code == 1
+    assert "Invalid --date" in result.output
+
+
+def test_transcribe_help_lists_date_option():
+    result = runner.invoke(app, ["transcribe", "--help"])
+    assert result.exit_code == 0
+    assert "--date" in result.output

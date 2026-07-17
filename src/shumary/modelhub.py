@@ -1,6 +1,8 @@
 """Singleton-loaded AI models — load once per process, reuse across all files in a batch."""
 
 import os
+import warnings
+from contextlib import contextmanager
 from functools import lru_cache
 
 from shumary.config import (
@@ -9,6 +11,14 @@ from shumary.config import (
     DIARIZATION_MODEL,
     HF_TOKEN_ENVVARS,
 )
+
+
+@contextmanager
+def _suppress_pyannote_warnings():
+    """Silence pyannote.audio's noisy import-/load-time UserWarnings."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+        yield
 
 
 @lru_cache(maxsize=None)
@@ -46,18 +56,14 @@ def diarization_pipeline():
         return None
 
     try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+        with _suppress_pyannote_warnings():
             from pyannote.audio import Pipeline  # type: ignore[import-untyped]
     except ImportError:
         print("  ⚠  pyannote.audio not installed — skipping diarization.")
         return None
 
     try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+        with _suppress_pyannote_warnings():
             pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=token)
         _move_to_device(pipeline)
         return pipeline
@@ -77,10 +83,15 @@ def _hf_token() -> str | None:
 
 
 def _autodetect_device() -> str:
+    # Note: MPS is intentionally NOT used for openai-whisper. Since Phase 3,
+    # word_timestamps=True is mandatory (Spec 3), and PyTorch's MPS backend
+    # cannot run the DTW alignment step it requires — `.double()` on an MPS
+    # tensor raises `TypeError: Cannot convert a MPS Tensor to float64 dtype`
+    # (observed on torch 2.12.0 / macOS, even with
+    # PYTORCH_ENABLE_MPS_FALLBACK=1). CPU is fully supported; CUDA supports
+    # float64 so it's used when available.
     try:
         import torch
-        if torch.backends.mps.is_available():
-            return "mps"
         if torch.cuda.is_available():
             return "cuda"
     except ImportError:

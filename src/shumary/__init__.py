@@ -1,1 +1,1 @@
-"""Shumary — personal LLM-maintained wiki fed by audio recordings."""
+"""Shumary — audio to detailed markdown transcripts with diarization and mood signals."""
