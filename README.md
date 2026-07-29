@@ -4,11 +4,16 @@
 > acoustic prosody — fast, accurate, fully local.
 
 ```bash
+shumary record            # capture a call: your mic + the laptop's audio
 shumary transcribe my-recording.m4a
 ```
 
 produces `my-recording.md`: a timestamped, per-speaker transcript with a structured frontmatter
 block covering speaking rate, pauses, fillers, turn-taking dynamics, and voice/pitch signals.
+
+There are two front ends over the same engine: this CLI, and a
+[menu bar app](#the-menu-bar-app) for everyday use. Everything runs on your machine — no LLM
+calls, no accounts, and nothing is ever uploaded.
 
 ---
 
@@ -75,10 +80,74 @@ shumary transcribe ./recordings/ -o ./transcripts/
 
 ---
 
+## The menu bar app
+
+For everyday use there's an ultraminimalist macOS menu bar app — the shumary mark in the menu bar,
+a steady red dot while recording, and nothing else:
+
+```bash
+./app/scripts/build-app.sh && open dist/shumary.app
+```
+
+| | |
+|---|---|
+| **Start / Stop recording** | `⌘R` in the menu, or **`⌃⌥⌘R` from anywhere** |
+| **Import recording…** | `⌘U` — pick existing audio to transcribe (opens at the Inbox) |
+| **Open recordings folder** | `⌘O` |
+| **Quit shumary** | `⌘Q` |
+
+Sessions land in `~/Documents/shumary/Recordings/<date-time>/` with the two audio tracks, a
+`metadata.json`, and transcripts in both Markdown and JSON. Recording always takes priority:
+starting one pauses any transcription in progress and resumes it afterwards, and the queue is
+rebuilt from disk at launch so nothing is lost to a crash.
+
+`⌃⌥⌘R` is a separate global hotkey because a menu bar app never becomes frontmost — plain `⌘R`
+only fires while the menu is open, which is no use mid-call.
+
+The app makes **no network connections and links no networking frameworks**. `Import recording…`
+reads a local file; nothing is ever uploaded.
+
+---
+
+## Recording a call
+
+`shumary record` captures **both sides of a conversation** — your microphone and whatever the
+laptop is playing (Zoom, Meet, Teams, a browser tab) — into a single stereo WAV:
+
+```bash
+shumary record                      # → recording-2026-07-29-1432.wav
+shumary record meeting.wav          # explicit name
+shumary record inbox/               # into a directory
+shumary record -t                   # …and transcribe as soon as it stops
+```
+
+Press **Ctrl-C** to stop. Your voice lands on the left channel, the remote participants on the
+right, and `shumary transcribe` picks this up automatically.
+
+**Why two channels matter:** normally a transcript's speaker labels are a clustering guess.
+Here your side is not a guess at all — anything arriving on the mic is you, by construction. So
+you get a real name instead of `SPEAKER_XX`, interruptions are measured exactly (both channels
+loud at once), and pyannote only has to separate the *remote* voices from each other, which it
+does far more reliably than separating them from you.
+
+| | |
+|---|---|
+| **macOS 14.4+** | Uses Core Audio process taps — no virtual audio driver, no admin rights |
+| **Audio keeps playing** | The tap is passive; you still hear the call normally |
+| **First run** | Compiles a small Swift helper (needs `xcode-select --install`), then reuses it |
+| **Permissions** | macOS asks for microphone and system-audio recording access on first use |
+
+> **Headphones or speakers?** Both work. Speaker output bleeds into the mic, but shumary rejects
+> it: a bleed is an attenuated copy of what the system channel already holds, so it never wins
+> against its own source. Headphones simply remove the question.
+
+---
+
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
+| `shumary record [PATH]` | Record your mic + the laptop's system audio (Ctrl-C to stop) |
 | `shumary transcribe PATH` | Transcribe one audio file, or every audio file in a directory |
 | `shumary cache list [SLUG]` | Show pipeline cache state |
 | `shumary cache clear [SLUG]` | Clear pipeline cache (all or one file, all or one stage) |
@@ -93,7 +162,17 @@ shumary transcribe rec.m4a --solo           # single-speaker recording, skip dia
 shumary transcribe rec.m4a --model medium   # use a different Whisper model
 shumary transcribe rec.m4a --date 2026-05-31   # override recording date detection
 shumary cache clear <slug> --stage mood     # re-run only the mood stage
+
+shumary transcribe rec.wav --dual-channel      # force channel-aware diarization
+shumary transcribe rec.wav --no-dual-channel   # diarize the mixdown instead
+
+shumary transcribe rec.m4a --json           # also write rec.json alongside rec.md
+shumary transcribe rec.m4a --progress-json  # NDJSON progress on stderr, for tooling
 ```
+
+`--dual-channel` is auto-enabled for anything made by `shumary record` (via a small
+`<name>.wav.shumary.json` sidecar written next to the audio). Use the flags to force it on for a
+stereo file recorded elsewhere with the same left=you / right=them layout, or to turn it off.
 
 ### Speed tuning
 
@@ -136,9 +215,17 @@ Every transcript is one self-contained markdown file:
   low-confidence/near-silence annotations.
 - **Plain Text** — the raw transcript text (optional, `--no-plain-text` to omit).
 
+With `--json` you also get a structured twin of the same analysis — the frontmatter fields plus
+every segment with its speaker, timings and confidence. The Markdown is for reading five minutes
+after a meeting; the JSON is for whatever you build on top of it. (The menu bar app always writes
+both.)
+
 All stages run locally: Whisper (mlx/faster/openai backend, auto-detected) for transcription,
 pyannote.audio (or a tokenless resemblyzer fallback) for diarization. No LLM calls, no network
 access beyond the one-time model download.
+
+For a `shumary record` capture the frontmatter reports `dual-channel+pyannote` as the backend,
+and your side of the conversation is labelled directly instead of `SPEAKER_XX`.
 
 ---
 

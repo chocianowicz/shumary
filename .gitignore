@@ -1,25 +1,52 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 .venv/
 venv/
-*.egg-info/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Swift / SwiftPM ───────────────────────────────────────────────────────────
+.build/
+.swiftpm/
+Package.resolved
+
+# Assembled app bundle — rebuild with ./app/scripts/build-app.sh
 dist/
 
-# Pipeline stage cache — per-recording intermediate results
+# ── Caches ────────────────────────────────────────────────────────────────────
+# Pipeline stage cache (per-recording intermediates) and downloaded model weights.
 .cache/
-
-# HF / Whisper model caches
 .huggingface/
 
-# OS / editor
+# ── OS / editor ───────────────────────────────────────────────────────────────
 .DS_Store
 .idea/
 .vscode/
 *.swp
 
-# Secrets
+# ── Secrets ───────────────────────────────────────────────────────────────────
 .env
 .env.local
+
+# ── Working folders ───────────────────────────────────────────────────────────
+# The folders are tracked (via .gitkeep) but never their contents: the audio is
+# large and private, and the transcripts can be regenerated from it.
+
+# Drop-folder for raw audio waiting to be transcribed.
+inbox/*
+!inbox/.gitkeep
+
+# Generated markdown output.
+transcripts/*
+!transcripts/.gitkeep
+
+# Audio archived here after a successful transcription (inbox-zero).
+processed/*
+!processed/.gitkeep
