@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>shumary</string>
+    <key>CFBundleDisplayName</key>
+    <string>shumary</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.shumary.app</string>
+    <key>CFBundleExecutable</key>
+    <string>shumary</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Menu bar only: no dock icon, never frontmost. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Core Audio process taps. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>14.4</string>
+
+    <key>NSMicrophoneUsageDescription</key>
+    <string>shumary records your microphone so it can transcribe your meetings on this Mac. Audio never leaves your machine.</string>
+
+    <!-- System-audio capture (the other side of the call). Present pre-emptively;
+         if a tap is ever refused, check Console.app for the TCC denial and use
+         whichever key it names. -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>shumary records the audio your Mac plays so it can transcribe the other participants in your meetings. Audio never leaves your machine.</string>
+</dict>
+</plist>
