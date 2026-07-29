@@ -2,8 +2,10 @@
 
 import time
 from pathlib import Path
+from typing import Callable
 
 from shumary import cache as cache_mod
+from shumary import recorder
 from shumary.backends import pick_backend
 from shumary.config import WHISPER_MODEL
 from shumary.errors import ShumaryError
@@ -29,6 +31,56 @@ from shumary.stages import prosody as prosody_stage
 from shumary.stages import render as render_stage
 
 
+# Share of total runtime each stage typically takes, used to turn discrete
+# stage transitions into a percentage. Whisper dominates; the rest are noise by
+# comparison. Deliberately coarse — sub-stage Whisper progress is not available
+# without reaching into every backend, and a monotonic estimate is worth more
+# than a precise one that stalls.
+STAGE_WEIGHTS: dict[str, float] = {
+    "decode": 0.02,
+    "transcribe": 0.70,
+    "diarize": 0.14,
+    "align": 0.02,
+    "mood": 0.02,
+    "interaction": 0.02,
+    "prosody": 0.06,
+    "render": 0.02,
+}
+
+ProgressSink = Callable[[dict], None]
+
+
+class _Progress:
+    """Turns stage transitions into monotonic progress events.
+
+    Skipped and cache-hit stages still report `done`, so the percentage always
+    advances and never stalls on work that didn't need doing.
+    """
+
+    def __init__(self, sink: ProgressSink | None) -> None:
+        self._sink = sink
+        self._completed = 0.0
+
+    def start(self, stage: str) -> None:
+        self._emit({"event": "stage", "stage": stage, "status": "start"})
+
+    def done(self, stage: str) -> None:
+        self._completed = min(1.0, self._completed + STAGE_WEIGHTS.get(stage, 0.0))
+        self._emit({"event": "stage", "stage": stage, "status": "done"})
+
+    def finished(self, output: Path) -> None:
+        self._completed = 1.0
+        self._emit({"event": "done", "output": str(output)})
+
+    def failed(self, message: str) -> None:
+        self._emit({"event": "error", "message": message})
+
+    def _emit(self, payload: dict) -> None:
+        if self._sink is None:
+            return
+        self._sink(payload | {"pct": round(self._completed, 4)})
+
+
 def process_file(
     audio: Path,
     *,
@@ -41,8 +93,12 @@ def process_file(
     backend_override: str | None = None,
     plain_text: bool = True,
     output: Path | None = None,
+    dual: bool | None = None,
+    progress: ProgressSink | None = None,
+    write_json: bool = False,
 ) -> Path:
     audio_stage.validate(audio)
+    prog = _Progress(progress)
     backend = pick_backend(backend_override)
     _start = time.monotonic()
     timings: dict[str, float | str] = {}
@@ -52,31 +108,49 @@ def process_file(
 
     _header(audio, date_str, slug, None, date_source)
 
+    mic_label = _resolve_mic_label(audio, dual)
+    dual_source = mic_label is not None and not solo and not no_diarize
+    if dual_source and audio_stage.channel_count(audio) != 2:
+        print("  ⚠  not a 2-channel recording — falling back to normal diarization\n")
+        dual_source = False
+
     prev_manifest = cache_mod.read_manifest(slug)
-    invalidated = cache_mod.ensure_manifest(slug, audio, model_name, fast)
+    invalidated = cache_mod.ensure_manifest(slug, audio, model_name, fast, dual_source)
     if invalidated:
-        print(f"  ♻️  cache invalidated: {_describe_invalidation(prev_manifest, model_name, fast, invalidated)}\n")
+        print(f"  ♻️  cache invalidated: {_describe_invalidation(prev_manifest, model_name, fast, dual_source, invalidated)}\n")
 
     # ── 0. Pre-decode to 16 kHz mono WAV ──────────────────────────────────────────
     _step(0, "Pre-decode Audio")
+    prog.start("decode")
     t0 = time.monotonic()
     wav = audio_stage.decode_to_wav(audio, slug)
+    channels: tuple[Path, Path] | None = None
+    if dual_source:
+        # Transcription still runs on the mixed-down mono WAV; the split
+        # channels only feed diarization.
+        channels = audio_stage.split_channels(audio, slug)
     timings["decode"] = time.monotonic() - t0
     duration_sec = audio_stage.wav_duration_seconds(wav)
     print(f"  🎚  {wav.name}  |  ⏱  {fmt_duration(duration_sec)}")
+    if channels:
+        print(f"  🎙  dual-source: left = {mic_label} · right = system audio")
+    prog.done("decode")
 
     # ── 1. Transcribe ──────────────────────────────────────────────────────────
     _step(1, "Whisper Transcription")
+    prog.start("transcribe")
     transcription = _run_timed_stage(
         timings, "transcribe", slug, "whisper", force,
         compute=lambda: transcribe_stage.run(wav, model_name, fast=fast, backend=backend),
         serialize=lambda r: r.to_dict(),
         deserialize=TranscriptionResult.from_dict,
     )
+    prog.done("transcribe")
     print(f"  language: {transcription.language}  |  words: {transcription.word_count}")
 
     # ── 2. Diarize ─────────────────────────────────────────────────────────────
     _step(2, "Speaker Diarization")
+    prog.start("diarize")
     if solo:
         print("  skipped (--solo) — single SPEAKER_00 turn")
         turns = [Turn(start=0.0, end=duration_sec, speaker="SPEAKER_00")]
@@ -88,15 +162,24 @@ def process_file(
         diarize_backend: str | None = None
         timings["diarize"] = "skipped"
     else:
+        if channels:
+            left, right = channels
+            compute_diarization = lambda: diarize_stage.run_dual(  # noqa: E731
+                left, right, mic_label=mic_label or recorder.MIC_LABEL
+            )
+        else:
+            compute_diarization = lambda: diarize_stage.run(wav)  # noqa: E731
+
         diarization = _run_timed_stage(
             timings, "diarize", slug, "diarize", force,
-            compute=lambda: diarize_stage.run(wav),
+            compute=compute_diarization,
             serialize=lambda d: d.to_dict() if d else {"skipped": "no_token"},
             deserialize=lambda d: None if "skipped" in d else DiarizationResult.from_dict(d),
         )
         turns = list(diarization.turns) if diarization else None
         diarize_backend = diarization.backend if diarization else None
 
+    prog.done("diarize")
     speaker_stats: SpeakerStats | None = diarize_stage.speaker_stats(turns)
     if speaker_stats:
         for s in speaker_stats.speakers:
@@ -106,6 +189,7 @@ def process_file(
 
     # ── 3. Align ───────────────────────────────────────────────────────────────
     _step(3, "Align Speakers → Segments")
+    prog.start("align")
 
     def _load_aligned(d: dict) -> list[AlignedSegment]:
         return [AlignedSegment.from_dict(s) for s in d["segments"]]
@@ -116,10 +200,12 @@ def process_file(
         serialize=lambda segs: {"segments": [s.to_dict() for s in segs]},
         deserialize=_load_aligned,
     )
+    prog.done("align")
     print(f"  {len(aligned)} segments")
 
     # ── 4. Mood analysis ───────────────────────────────────────────────────────
     _step(4, "Behavioral / Mood Analysis")
+    prog.start("mood")
     mood = _run_timed_stage(
         timings, "mood", slug, "mood", force,
         compute=lambda: mood_stage.run(aligned, transcription.language),
@@ -127,12 +213,14 @@ def process_file(
         deserialize=MoodSignals.from_dict,
     )
     print(f"  rate: {mood.avg_speaking_rate_wps} wps  |  pauses: {mood.long_pauses}  |  fillers: {mood.filler_word_count}")
+    prog.done("mood")
     print(f"  state: {mood.inferred_state}")
 
     # ── 5. Interaction metrics ─────────────────────────────────────────────────
     interaction: InteractionMetrics | None = None
     if turns and speaker_stats and speaker_stats.count >= 2:
         _step(5, "Interaction Dynamics")
+        prog.start("interaction")
         interaction = _run_timed_stage(
             timings, "interaction", slug, "interaction", force,
             compute=lambda: interaction_stage.run(turns, diarize_backend or "resemblyzer"),
@@ -148,11 +236,13 @@ def process_file(
             else "overlap: n/a"
         )
         print(f"  {turn_summary}  |  {overlap_summary}")
-    else:
+    prog.done("interaction")
+    if interaction is None:
         timings["interaction"] = "skipped"
 
     # ── 6. Prosody analysis ─────────────────────────────────────────────────────
     _step(6, "Acoustic Prosody Analysis")
+    prog.start("prosody")
     if not prosody_stage.available():
         print("  ⚠  librosa/praat-parselmouth not installed — skipping prosody extraction")
         prosody = None
@@ -169,8 +259,11 @@ def process_file(
         else:
             print("  (no prosody data)")
 
+    prog.done("prosody")
+
     # ── 7. Render transcript ───────────────────────────────────────────────────
     _step(7, "Render Transcript")
+    prog.start("render")
     t0 = time.monotonic()
     out_path = output_path_for(audio, output)
     render_stage.save_transcript(
@@ -188,8 +281,27 @@ def process_file(
         out_path=out_path,
         plain_text=plain_text,
     )
+    if write_json:
+        json_path = render_stage.save_transcript_json(
+            audio=audio,
+            transcription=transcription,
+            segments=aligned,
+            mood=mood,
+            speaker_stats=speaker_stats,
+            diarize_backend=diarize_backend,
+            interaction=interaction,
+            prosody=prosody,
+            date_str=date_str,
+            slug=slug,
+            duration_sec=duration_sec,
+            out_path=out_path.with_suffix(".json"),
+        )
+        print(f"  🧾  {json_path}")
     timings["render"] = time.monotonic() - t0
     print(f"  📝  {out_path}")
+
+    prog.done("render")
+    prog.finished(out_path)
 
     cache_mod.mark_done(slug)
     elapsed = time.monotonic() - _start
@@ -209,6 +321,9 @@ def process_directory(
     backend_override: str | None = None,
     plain_text: bool = True,
     output_dir: Path | None = None,
+    dual: bool | None = None,
+    progress: ProgressSink | None = None,
+    write_json: bool = False,
 ) -> tuple[list[Path], list[Path]]:
     """Process every audio file in `directory`, continuing past per-file failures.
 
@@ -231,7 +346,7 @@ def process_directory(
                     f, force=force, no_diarize=no_diarize, solo=solo, fast=fast,
                     model_name=model_name, date_override=date_override,
                     backend_override=backend_override, plain_text=plain_text,
-                    output=output_dir,
+                    output=output_dir, dual=dual, progress=progress, write_json=write_json,
                 )
             )
         except ShumaryError as exc:
@@ -274,10 +389,26 @@ def _header(audio: Path, date_str: str, slug: str, duration_sec: float | None = 
     print(f"{'═'*60}\n")
 
 
+def _resolve_mic_label(audio: Path, dual: bool | None) -> str | None:
+    """The mic channel's speaker label, or None if this isn't a dual-source run.
+
+    `dual` is a three-state switch: None auto-detects from the recording's
+    sidecar, True forces channel-aware diarization on any stereo file, and
+    False disables it even for a `shumary record` capture.
+    """
+    if dual is False:
+        return None
+    info = recorder.dual_source_info(audio)
+    if info:
+        return str(info.get("mic_label") or recorder.MIC_LABEL)
+    return recorder.MIC_LABEL if dual else None
+
+
 def _describe_invalidation(
     prev_manifest: dict | None,
     model_name: str,
     fast: bool,
+    dual_source: bool,
     invalidated: list[str],
 ) -> str:
     """Human-readable summary of why the cache was invalidated."""
@@ -289,6 +420,11 @@ def _describe_invalidation(
         reasons.append(f"model changed {prev_manifest.get('model_name')} → {model_name}")
     if prev_manifest.get("fast") != fast:
         reasons.append(f"--fast changed {prev_manifest.get('fast')} → {fast}")
+    if bool(prev_manifest.get("dual_source", False)) != bool(dual_source):
+        reasons.append(
+            f"dual-source diarization changed "
+            f"{bool(prev_manifest.get('dual_source', False))} → {dual_source}"
+        )
     if prev_manifest.get("pipeline_version") != cache_mod.PIPELINE_VERSION:
         reasons.append(
             f"pipeline version {prev_manifest.get('pipeline_version')} → {cache_mod.PIPELINE_VERSION}"

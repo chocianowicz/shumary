@@ -417,3 +417,88 @@ def test_prosody_cache_invalidated_when_align_recomputed(tmp_path, monkeypatch):
     # Recomputing align must drop the now-stale prosody cache.
     cache_mod.write(slug, "align", {"segments": []})
     assert not cache_mod.is_cached(slug, "prosody")
+
+
+# ── dual-source detection ──────────────────────────────────────────────────────
+
+def test_resolve_mic_label_auto_detects_a_recording(tmp_path):
+    from shumary import recorder
+
+    wav = tmp_path / "meeting.wav"
+    recorder.write_sidecar(wav, mic_label="Denis")
+
+    assert pipeline._resolve_mic_label(wav, None) == "Denis"
+
+
+def test_resolve_mic_label_is_none_for_an_ordinary_file(tmp_path):
+    assert pipeline._resolve_mic_label(tmp_path / "memo.m4a", None) is None
+
+
+def test_resolve_mic_label_can_be_forced_without_a_sidecar(tmp_path):
+    from shumary import recorder
+
+    assert pipeline._resolve_mic_label(tmp_path / "memo.wav", True) == recorder.MIC_LABEL
+
+
+def test_resolve_mic_label_can_be_disabled_for_a_recording(tmp_path):
+    from shumary import recorder
+
+    wav = tmp_path / "meeting.wav"
+    recorder.write_sidecar(wav)
+
+    assert pipeline._resolve_mic_label(wav, False) is None
+
+
+def test_describe_invalidation_reports_a_dual_source_switch():
+    prev = {"model_name": "large", "fast": False, "dual_source": False,
+            "pipeline_version": cache_mod.PIPELINE_VERSION}
+
+    described = pipeline._describe_invalidation(prev, "large", False, True, ["diarize"])
+
+    assert "dual-source" in described
+    assert "diarize" in described
+
+
+# ── progress events ────────────────────────────────────────────────────────────
+
+def test_progress_is_monotonic_and_ends_at_one():
+    events = []
+    prog = pipeline._Progress(events.append)
+
+    for stage in pipeline.STAGE_WEIGHTS:
+        prog.start(stage)
+        prog.done(stage)
+    prog.finished(Path("/tmp/out.md"))
+
+    pcts = [e["pct"] for e in events]
+    assert pcts == sorted(pcts), "progress must never go backwards"
+    assert pcts[-1] == 1.0
+    assert events[-1]["event"] == "done"
+
+
+def test_progress_weights_sum_to_one():
+    assert sum(pipeline.STAGE_WEIGHTS.values()) == pytest.approx(1.0)
+
+
+def test_progress_is_a_no_op_without_a_sink():
+    prog = pipeline._Progress(None)
+    prog.start("decode")
+    prog.done("decode")
+    prog.finished(Path("/tmp/out.md"))  # must not raise
+
+
+def test_progress_reports_stage_and_status():
+    events = []
+    prog = pipeline._Progress(events.append)
+    prog.start("transcribe")
+    prog.done("transcribe")
+
+    assert events[0] == {"event": "stage", "stage": "transcribe", "status": "start", "pct": 0.0}
+    assert events[1]["status"] == "done"
+    assert events[1]["pct"] == pytest.approx(pipeline.STAGE_WEIGHTS["transcribe"])
+
+
+def test_progress_failure_event_carries_message():
+    events = []
+    pipeline._Progress(events.append).failed("boom")
+    assert events == [{"event": "error", "message": "boom", "pct": 0.0}]

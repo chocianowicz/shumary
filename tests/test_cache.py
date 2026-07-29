@@ -311,3 +311,58 @@ def test_write_leaf_stage_does_not_touch_unrelated_stages():
     assert cache_mod.is_cached("slug-write-leaf", "whisper")
     assert cache_mod.is_cached("slug-write-leaf", "align")
     assert cache_mod.read("slug-write-leaf", "mood") == {"inferred_state": "y"}
+
+
+# ── dual-source manifest reconciliation ────────────────────────────────────────
+
+def test_manifest_records_dual_source_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache_mod, "cache_dir_for", lambda slug: tmp_path / slug)
+
+    audio = tmp_path / "meeting.wav"
+    audio.write_bytes(b"audio-bytes")
+    cache_mod.ensure_manifest("meeting", audio, "large", False, True)
+
+    assert cache_mod.read_manifest("meeting")["dual_source"] is True
+
+
+def test_switching_dual_source_invalidates_diarize_not_whisper(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache_mod, "cache_dir_for", lambda slug: tmp_path / slug)
+
+    audio = tmp_path / "meeting.wav"
+    audio.write_bytes(b"audio-bytes")
+    cache_mod.ensure_manifest("meeting", audio, "large", False, False)
+
+    cache_mod.write("meeting", "whisper", {"ok": True})
+    cache_mod.write("meeting", "diarize", {"ok": True})
+
+    invalidated = cache_mod.ensure_manifest("meeting", audio, "large", False, True)
+
+    assert "diarize" in invalidated
+    assert cache_mod.is_cached("meeting", "whisper")
+    assert not cache_mod.is_cached("meeting", "diarize")
+
+
+def test_unchanged_dual_source_flag_is_a_no_op(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache_mod, "cache_dir_for", lambda slug: tmp_path / slug)
+
+    audio = tmp_path / "meeting.wav"
+    audio.write_bytes(b"audio-bytes")
+    cache_mod.ensure_manifest("meeting", audio, "large", False, True)
+    cache_mod.write("meeting", "diarize", {"ok": True})
+
+    assert cache_mod.ensure_manifest("meeting", audio, "large", False, True) == []
+    assert cache_mod.is_cached("meeting", "diarize")
+
+
+def test_mark_done_removes_split_channel_wavs(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache_mod, "cache_dir_for", lambda slug: tmp_path / slug)
+
+    d = tmp_path / "meeting"
+    d.mkdir()
+    for name in ("audio.wav", "left.wav", "right.wav"):
+        (d / name).write_bytes(b"pcm")
+
+    cache_mod.mark_done("meeting")
+
+    assert not any((d / n).exists() for n in ("audio.wav", "left.wav", "right.wav"))
+    assert cache_mod.is_done("meeting")

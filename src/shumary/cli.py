@@ -80,10 +80,37 @@ def transcribe(
         help="Omit the '## Plain Text' section (the full transcript text is "
              "already in '## Full Transcript'; this halves file size).",
     ),
+    json_transcript: bool = typer.Option(
+        False, "--json",
+        help="Also write a structured <name>.json transcript beside the Markdown.",
+    ),
+    progress_json: bool = typer.Option(
+        False, "--progress-json",
+        help="Emit newline-delimited JSON progress events on stderr, for tooling "
+             "that needs to track a run (the menu bar app uses this).",
+    ),
+    dual_channel: Optional[bool] = typer.Option(
+        None, "--dual-channel/--no-dual-channel",
+        help=(
+            "Treat the two channels as separate sources (left = you, right = "
+            "system audio) instead of a stereo mix. Auto-enabled for recordings "
+            "made by `shumary record`; use --dual-channel to force it on any "
+            "stereo file, or --no-dual-channel to diarize the mixdown instead."
+        ),
+    ),
 ) -> None:
     """Transcribe one audio file, or every audio file in a directory."""
+    import json
+    import sys
+
     from shumary import pipeline
     from shumary.errors import ShumaryError
+
+    def _emit(payload: dict) -> None:
+        sys.stderr.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+
+    progress = _emit if progress_json else None
 
     if date is not None:
         try:
@@ -105,9 +132,11 @@ def transcribe(
             _succeeded, failed = pipeline.process_directory(
                 path, force=force, no_diarize=no_diarize, solo=solo, fast=fast, model_name=model,
                 date_override=date, backend_override=backend, plain_text=plain_text,
-                output_dir=output,
+                output_dir=output, dual=dual_channel, progress=progress, write_json=json_transcript,
             )
         except ShumaryError as exc:
+            if progress:
+                _emit({"event": "error", "message": str(exc), "pct": 0.0})
             _console().print(f"[red]❌  {exc}[/red]")
             raise typer.Exit(code=1)
         if failed:
@@ -117,11 +146,64 @@ def transcribe(
             pipeline.process_file(
                 path, force=force, no_diarize=no_diarize, solo=solo, fast=fast, model_name=model,
                 date_override=date, backend_override=backend, plain_text=plain_text,
-                output=output,
+                output=output, dual=dual_channel, progress=progress, write_json=json_transcript,
             )
+        except ShumaryError as exc:
+            if progress:
+                _emit({"event": "error", "message": str(exc), "pct": 0.0})
+            _console().print(f"[red]❌  {exc}[/red]")
+            raise typer.Exit(code=1)
+
+
+# ── shumary record ─────────────────────────────────────────────────────────────
+
+@app.command()
+def record(
+    output: Annotated[Optional[Path], typer.Argument(
+        help="Output .wav path, or a directory. Defaults to recording-<date>-<time>.wav here.",
+    )] = None,
+    transcribe_after: bool = typer.Option(
+        False, "--transcribe", "-t",
+        help="Transcribe the recording as soon as it stops.",
+    ),
+) -> None:
+    """Record your microphone and the laptop's system audio into one file.
+
+    Captures both sides of a call: your voice on the left channel, everything
+    the machine plays (the other participants) on the right. Press Ctrl-C to
+    stop. `shumary transcribe` then uses the channels to tell you apart from
+    them instead of guessing.
+    """
+    from shumary import recorder
+    from shumary.errors import ShumaryError
+
+    if output is None:
+        target = recorder.default_output_path()
+    elif output.is_dir():
+        target = recorder.default_output_path(output)
+    else:
+        target = output if output.suffix else output.with_suffix(".wav")
+
+    _console().print(f"\n[bold]Recording[/bold] → {target}")
+    _console().print("[dim]you = left channel · system audio = right channel[/dim]\n")
+
+    try:
+        wav = recorder.record(target)
+    except ShumaryError as exc:
+        _console().print(f"[red]❌  {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    _console().print(f"\n[green]✅  Saved[/green] {wav}")
+
+    if transcribe_after:
+        from shumary import pipeline
+        try:
+            pipeline.process_file(wav)
         except ShumaryError as exc:
             _console().print(f"[red]❌  {exc}[/red]")
             raise typer.Exit(code=1)
+    else:
+        _console().print(f"[dim]Transcribe it with:[/dim] shumary transcribe {wav}")
 
 
 # ── shumary cache list / clear ─────────────────────────────────────────────────
@@ -248,6 +330,10 @@ def doctor() -> None:
         t.add_row("HF_TOKEN", "✅", f"{hf_token[:8]}…")
     else:
         t.add_row("HF_TOKEN", "⚠ ", "Using resemblyzer fallback")
+
+    from shumary import recorder
+    recorder_ok, recorder_note = recorder.helper_status()
+    t.add_row("recorder", "✅" if recorder_ok else "⚠ ", recorder_note)
 
     pyannote_cached = _pyannote_weights_cached()
     if pyannote_cached:

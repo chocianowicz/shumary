@@ -109,3 +109,96 @@ def test_decode_to_wav_ffmpeg_failure_raises_shumary_error(tmp_path, monkeypatch
 
     with pytest.raises(ShumaryError, match="ffmpeg failed"):
         audio.decode_to_wav(src, "memo")
+
+
+# ── split_channels / channel_count (dual-source recordings) ─────────────────────
+
+def test_channel_count_reads_stream_channels(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        audio.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="2\n", stderr=""),
+    )
+    assert audio.channel_count(tmp_path / "rec.wav") == 2
+
+
+def test_channel_count_returns_none_when_ffprobe_says_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        audio.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom"),
+    )
+    assert audio.channel_count(tmp_path / "rec.wav") is None
+
+
+def test_split_channels_missing_ffmpeg_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio, "cache_dir_for", lambda slug: tmp_path / slug)
+    monkeypatch.setattr(audio.shutil, "which", lambda name: None)
+
+    src = tmp_path / "rec.wav"
+    src.write_text("fake-audio")
+
+    with pytest.raises(ShumaryError, match="ffmpeg"):
+        audio.split_channels(src, "rec")
+
+
+def test_split_channels_writes_left_and_right_mono_wavs(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio, "cache_dir_for", lambda slug: tmp_path / slug)
+    monkeypatch.setattr(audio.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    src = tmp_path / "rec.wav"
+    src.write_text("fake-audio")
+
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        for arg in cmd:
+            if str(arg).endswith(".tmp.wav"):
+                Path(arg).parent.mkdir(parents=True, exist_ok=True)
+                Path(arg).write_bytes(b"RIFF....WAVEfmt ")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(audio.subprocess, "run", _fake_run)
+
+    left, right = audio.split_channels(src, "rec")
+
+    assert left.name == "left.wav" and right.name == "right.wav"
+    assert left.exists() and right.exists()
+    assert "channelsplit=channel_layout=stereo[l][r]" in " ".join(captured["cmd"])
+    # Both channels are downmixed to 16 kHz mono, like the main decode path.
+    assert captured["cmd"].count("16000") == 2
+
+
+def test_split_channels_reuses_existing_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio, "cache_dir_for", lambda slug: tmp_path / slug)
+
+    cache = tmp_path / "rec"
+    cache.mkdir()
+    (cache / "left.wav").write_bytes(b"cached-left")
+    (cache / "right.wav").write_bytes(b"cached-right")
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("ffmpeg should not run when both channels are cached")
+
+    monkeypatch.setattr(audio.subprocess, "run", _explode)
+
+    src = tmp_path / "rec.wav"
+    src.write_text("fake-audio")
+
+    left, right = audio.split_channels(src, "rec")
+    assert left.read_bytes() == b"cached-left"
+
+
+def test_split_channels_ffmpeg_failure_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio, "cache_dir_for", lambda slug: tmp_path / slug)
+    monkeypatch.setattr(audio.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    src = tmp_path / "rec.wav"
+    src.write_text("fake-audio")
+
+    def _fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd, stderr="bad layout")
+
+    monkeypatch.setattr(audio.subprocess, "run", _fake_run)
+
+    with pytest.raises(ShumaryError, match="split channels"):
+        audio.split_channels(src, "rec")

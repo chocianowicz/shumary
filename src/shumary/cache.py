@@ -108,9 +108,8 @@ def clear(slug: str, stage: str | None = None) -> None:
 def mark_done(slug: str) -> None:
     d = cache_dir_for(slug)
     d.mkdir(parents=True, exist_ok=True)
-    wav = d / "audio.wav"
-    if wav.exists():
-        wav.unlink()
+    for name in ("audio.wav", "left.wav", "right.wav"):
+        (d / name).unlink(missing_ok=True)
     (d / DONE_SENTINEL).touch()
 
 
@@ -184,13 +183,16 @@ def read_manifest(slug: str) -> dict[str, Any] | None:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def write_manifest(slug: str, *, audio_hash: str, model_name: str, fast: bool) -> None:
+def write_manifest(
+    slug: str, *, audio_hash: str, model_name: str, fast: bool, dual_source: bool = False
+) -> None:
     p = _manifest_path(slug)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "audio_hash": audio_hash,
         "model_name": model_name,
         "fast": fast,
+        "dual_source": dual_source,
         "pipeline_version": PIPELINE_VERSION,
     }
     tmp = p.with_suffix(".tmp")
@@ -211,7 +213,9 @@ def fingerprint_info(slug: str) -> str:
     return f"{model_name}{fast_suffix} · {short_hash}"
 
 
-def ensure_manifest(slug: str, audio: Path, model_name: str, fast: bool) -> list[str]:
+def ensure_manifest(
+    slug: str, audio: Path, model_name: str, fast: bool, dual_source: bool = False
+) -> list[str]:
     """Reconcile the slug's cache manifest against the current run's parameters.
 
     - No manifest but stage files present: a v1/legacy cache (predates the
@@ -221,6 +225,9 @@ def ensure_manifest(slug: str, audio: Path, model_name: str, fast: bool) -> list
       raise `ShumaryError` (rename the file or clear the cache).
     - Manifest present, `model_name`/`fast`/`pipeline_version` differ: invalidate
       the `whisper` stage and its descendants, then update the manifest.
+    - Manifest present, `dual_source` differs: invalidate the `diarize` stage and
+      its descendants — the same audio diarized per-channel and mixed-down
+      produces different turns.
     - Otherwise: no-op.
 
     Returns the list of stages invalidated (possibly empty).
@@ -242,7 +249,10 @@ def ensure_manifest(slug: str, audio: Path, model_name: str, fast: bool) -> list
             done = d / DONE_SENTINEL
             if done.exists():
                 done.unlink()
-        write_manifest(slug, audio_hash=audio_hash, model_name=model_name, fast=fast)
+        write_manifest(
+            slug, audio_hash=audio_hash, model_name=model_name,
+            fast=fast, dual_source=dual_source,
+        )
         return invalidated
 
     if manifest.get("audio_hash") != audio_hash:
@@ -257,9 +267,18 @@ def ensure_manifest(slug: str, audio: Path, model_name: str, fast: bool) -> list
         or manifest.get("fast") != fast
         or manifest.get("pipeline_version") != PIPELINE_VERSION
     )
-    if params_changed:
-        invalidated = invalidate_stage(slug, "whisper")
-        write_manifest(slug, audio_hash=audio_hash, model_name=model_name, fast=fast)
+    dual_changed = bool(manifest.get("dual_source", False)) != bool(dual_source)
+
+    if params_changed or dual_changed:
+        invalidated: list[str] = []
+        if params_changed:
+            invalidated += invalidate_stage(slug, "whisper")
+        if dual_changed:
+            invalidated += [s for s in invalidate_stage(slug, "diarize") if s not in invalidated]
+        write_manifest(
+            slug, audio_hash=audio_hash, model_name=model_name,
+            fast=fast, dual_source=dual_source,
+        )
         return invalidated
 
     return []

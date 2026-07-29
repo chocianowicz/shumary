@@ -52,6 +52,59 @@ def save_transcript(
     return out_path
 
 
+def save_transcript_json(
+    audio: Path,
+    transcription: TranscriptionResult,
+    segments: list[AlignedSegment],
+    mood: MoodSignals,
+    speaker_stats: SpeakerStats | None,
+    date_str: str,
+    slug: str,
+    duration_sec: float | None,
+    out_path: Path,
+    diarize_backend: str | None = None,
+    interaction: InteractionMetrics | None = None,
+    prosody: ProsodyResult | None = None,
+) -> Path:
+    """Write the machine-readable twin of the Markdown transcript.
+
+    Same analysis, structured rather than formatted: the Markdown is for reading
+    five minutes after a meeting, this is for everything built on top of it.
+    """
+    import json
+
+    payload = _frontmatter_data(
+        audio=audio,
+        transcription=transcription,
+        mood=mood,
+        speaker_stats=speaker_stats,
+        date_str=date_str,
+        duration_sec=duration_sec,
+        slug=slug,
+        diarize_backend=diarize_backend,
+        interaction=interaction,
+        prosody=prosody,
+    )
+    payload["segments"] = [
+        {
+            "start": seg.start,
+            "end": seg.end,
+            "speaker": seg.speaker,
+            "text": seg.text.strip(),
+            "avg_logprob": seg.avg_logprob,
+            "no_speech_prob": seg.no_speech_prob,
+        }
+        for seg in segments
+    ]
+    payload["text"] = transcription.text
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return out_path
+
+
 # ── Document builder ───────────────────────────────────────────────────────────
 
 def _build_document(
@@ -103,7 +156,7 @@ def _build_document(
     return "\n".join(parts)
 
 
-def _build_frontmatter(
+def _frontmatter_data(
     audio: Path,
     transcription: TranscriptionResult,
     mood: MoodSignals,
@@ -114,7 +167,8 @@ def _build_frontmatter(
     diarize_backend: str | None = None,
     interaction: InteractionMetrics | None = None,
     prosody: ProsodyResult | None = None,
-) -> str:
+) -> dict:
+    """The structured summary shared by the YAML frontmatter and the JSON transcript."""
     if speaker_stats:
         speakers_block = {
             "count": speaker_stats.count,
@@ -166,8 +220,15 @@ def _build_frontmatter(
     if prosody is not None and prosody.speakers:
         data["prosody"] = [_speaker_prosody_block(sp) for sp in prosody.speakers]
 
+    return data
+
+
+def _build_frontmatter(**kwargs) -> str:
     import yaml
-    return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    return yaml.safe_dump(
+        _frontmatter_data(**kwargs),
+        allow_unicode=True, sort_keys=False, default_flow_style=False,
+    )
 
 
 def _speaker_prosody_block(sp) -> dict:

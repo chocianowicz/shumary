@@ -1,5 +1,6 @@
 """Tests for stages/render.py — transcript markdown generation."""
 
+import json
 import yaml
 from pathlib import Path
 
@@ -806,3 +807,57 @@ def test_save_transcript_includes_prosody_section_when_provided(tmp_path):
     parsed = yaml.safe_load(content.split("---\n")[1])
     assert "prosody" in parsed
     assert len(parsed["prosody"]) == 2
+
+
+# ── JSON transcript ────────────────────────────────────────────────────────────
+
+def test_save_transcript_json_carries_segments_and_summary(tmp_path, simple_segments, sample_aligned, sample_mood):
+    from shumary.models import TranscriptionResult
+
+    transcription = TranscriptionResult(
+        language="en", word_count=12, text="hello world", segments=simple_segments,
+    )
+    out = tmp_path / "transcript.json"
+
+    render.save_transcript_json(
+        audio=tmp_path / "meeting.wav",
+        transcription=transcription,
+        segments=sample_aligned,
+        mood=sample_mood,
+        speaker_stats=None,
+        date_str="2026-07-29",
+        slug="meeting",
+        duration_sec=13.0,
+        out_path=out,
+    )
+
+    payload = json.loads(out.read_text())
+    assert payload["language"] == "en"
+    assert payload["text"] == "hello world"
+    assert len(payload["segments"]) == len(sample_aligned)
+    assert payload["segments"][0]["speaker"] == "SPEAKER_00"
+    assert "mood_signals" in payload
+
+
+def test_json_and_markdown_agree_on_the_summary(tmp_path, simple_segments, sample_aligned, sample_mood):
+    from shumary.models import TranscriptionResult
+
+    transcription = TranscriptionResult(
+        language="en", word_count=12, text="hello world", segments=simple_segments,
+    )
+    common = dict(
+        audio=tmp_path / "meeting.wav",
+        transcription=transcription,
+        segments=sample_aligned,
+        mood=sample_mood,
+        speaker_stats=None,
+        date_str="2026-07-29",
+        slug="meeting",
+        duration_sec=13.0,
+    )
+    md = render.save_transcript(out_path=tmp_path / "t.md", **common)
+    js = render.save_transcript_json(out_path=tmp_path / "t.json", **common)
+
+    payload = json.loads(js.read_text())
+    assert payload["title"] in md.read_text()
+    assert payload["date"] == "2026-07-29"

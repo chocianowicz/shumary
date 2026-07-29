@@ -34,6 +34,36 @@ HF_TOKEN_ENVVARS = ("HF_TOKEN", "HUGGINGFACE_TOKEN")
 
 SOLO_SILHOUETTE: float = 0.2118
 
+# ── Dual-source recordings (mic on the left channel, system audio on the right) ──
+# For recordings made by `shumary record` the two channels are separate sources,
+# so "who is speaking" is a channel question, not a clustering one. The mic
+# channel is gated by energy and the system channel is diarized normally.
+
+# RMS envelope framing for the mic channel's speech gate.
+DUAL_FRAME_SEC: float = 0.03
+DUAL_HOP_SEC: float = 0.01
+
+# The mic must exceed its own noise floor by this much to count as speech.
+DUAL_SPEECH_MARGIN_DB: float = 10.0
+
+# ...and must also exceed the system channel by this much, which is what rejects
+# speaker bleed: audio played out loud and picked up by the mic arrives
+# attenuated, so it never wins against the system channel it came from.
+# Headphones make this moot; this margin is what makes speakers survivable.
+DUAL_ECHO_MARGIN_DB: float = 6.0
+
+# Envelope smoothing: gaps shorter than this are bridged, and runs shorter than
+# this are dropped, so a turn is not shredded by ordinary pauses between words.
+DUAL_MIN_GAP_SEC: float = 0.35
+DUAL_MIN_SPEECH_SEC: float = 0.25
+
+# Percentile of the mic's RMS envelope treated as its noise floor.
+DUAL_NOISE_FLOOR_PCT: float = 20.0
+
+# A system channel whose peak never clears this (relative to full scale) is
+# treated as silent — nothing was playing, so there is no remote side.
+DUAL_SILENT_CHANNEL_PEAK: float = 1e-4
+
 # ── Audio ──────────────────────────────────────────────────────────────────────
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset(

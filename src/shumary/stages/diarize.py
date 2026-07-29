@@ -12,9 +12,20 @@ gap heuristic is unreliable on long recordings where within-speaker variance
 grows and creates false gaps in the dendrogram.
 """
 
+import wave
 from pathlib import Path
 
-from shumary.config import SOLO_SILHOUETTE
+from shumary.config import (
+    DUAL_ECHO_MARGIN_DB,
+    DUAL_FRAME_SEC,
+    DUAL_HOP_SEC,
+    DUAL_MIN_GAP_SEC,
+    DUAL_MIN_SPEECH_SEC,
+    DUAL_NOISE_FLOOR_PCT,
+    DUAL_SILENT_CHANNEL_PEAK,
+    DUAL_SPEECH_MARGIN_DB,
+    SOLO_SILHOUETTE,
+)
 from shumary.models import Turn, DiarizationResult, SpeakerStat, SpeakerStats
 from shumary.modelhub import diarization_pipeline, resemblyzer_encoder
 
@@ -33,6 +44,136 @@ def run(audio: Path) -> DiarizationResult | None:
     if turns is not None:
         return DiarizationResult(turns=tuple(turns), backend="resemblyzer")
     return None
+
+
+# ── dual-source (mic + system) ─────────────────────────────────────────────────
+
+def run_dual(left: Path, right: Path, *, mic_label: str) -> DiarizationResult | None:
+    """Diarize a recording whose channels are separate sources.
+
+    The mic channel needs no clustering — anything on it is the person at the
+    keyboard — so it is gated by energy and labelled directly. Only the system
+    channel goes through a diarization backend, to split the remote
+    participants from each other.
+
+    Turns from the two channels are kept as-is rather than made mutually
+    exclusive: genuine simultaneous speech is exactly what makes interruption
+    metrics meaningful here.
+    """
+    mic_turns = _mic_turns(left, right, label=mic_label)
+
+    remote = run(right) if _has_signal(right) else None
+    if remote is None and not mic_turns:
+        return None
+
+    remote_turns = list(remote.turns) if remote else []
+    backend = f"dual-channel+{remote.backend}" if remote else "dual-channel"
+
+    turns = sorted(mic_turns + remote_turns, key=lambda t: (t.start, t.end))
+    return DiarizationResult(turns=tuple(turns), backend=backend)
+
+
+def _read_mono_wav(path: Path):
+    """16-bit mono WAV as a float array in [-1, 1], plus its sample rate."""
+    import numpy as np
+
+    with wave.open(str(path), "rb") as f:
+        rate = f.getframerate()
+        frames = f.readframes(f.getnframes())
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    return samples, rate
+
+
+def _rms_envelope(samples, rate: int):
+    """Frame-wise RMS of `samples`, using the dual-source framing constants."""
+    import numpy as np
+
+    frame = max(1, int(DUAL_FRAME_SEC * rate))
+    hop = max(1, int(DUAL_HOP_SEC * rate))
+    if len(samples) < frame:
+        return np.zeros(0, dtype=np.float32)
+
+    count = 1 + (len(samples) - frame) // hop
+    # Strided view over the samples — avoids materializing count*frame floats
+    # for a long recording.
+    windows = np.lib.stride_tricks.as_strided(
+        samples,
+        shape=(count, frame),
+        strides=(samples.strides[0] * hop, samples.strides[0]),
+    )
+    return np.sqrt((windows.astype(np.float32) ** 2).mean(axis=1))
+
+
+def _has_signal(path: Path) -> bool:
+    import numpy as np
+
+    try:
+        samples, _ = _read_mono_wav(path)
+    except (OSError, wave.Error):
+        return False
+    return bool(len(samples)) and float(np.max(np.abs(samples))) > DUAL_SILENT_CHANNEL_PEAK
+
+
+def _mic_turns(left: Path, right: Path, *, label: str) -> list[Turn]:
+    """Speech turns for the mic channel, rejecting bleed from the speakers."""
+    import numpy as np
+
+    try:
+        mic, rate = _read_mono_wav(left)
+        system, _ = _read_mono_wav(right)
+    except (OSError, wave.Error) as exc:
+        print(f"  ⚠  could not read recording channels: {exc}")
+        return []
+
+    mic_rms = _rms_envelope(mic, rate)
+    system_rms = _rms_envelope(system, rate)
+    if not len(mic_rms):
+        return []
+
+    # ffmpeg can emit a frame or two of difference between the two channels.
+    n = min(len(mic_rms), len(system_rms)) if len(system_rms) else len(mic_rms)
+    mic_rms = mic_rms[:n]
+    system_rms = system_rms[:n] if len(system_rms) else np.zeros(n, dtype=np.float32)
+
+    floor = float(np.percentile(mic_rms, DUAL_NOISE_FLOOR_PCT))
+    speech_threshold = max(floor * 10 ** (DUAL_SPEECH_MARGIN_DB / 20), DUAL_SILENT_CHANNEL_PEAK)
+    echo_ratio = 10 ** (DUAL_ECHO_MARGIN_DB / 20)
+
+    active = (mic_rms > speech_threshold) & (mic_rms > system_rms * echo_ratio)
+    spans = _spans_from_mask(active, hop_sec=DUAL_HOP_SEC, frame_sec=DUAL_FRAME_SEC)
+    return [Turn(start=start, end=end, speaker=label) for start, end in spans]
+
+
+def _spans_from_mask(mask, *, hop_sec: float, frame_sec: float) -> list[tuple[float, float]]:
+    """Convert a boolean frame mask into smoothed (start, end) second spans."""
+    import numpy as np
+
+    if not mask.any():
+        return []
+
+    # Frame index -> span, then smooth in the time domain where the thresholds
+    # are expressed.
+    edges = np.diff(mask.astype(np.int8))
+    starts = list((np.flatnonzero(edges == 1) + 1))
+    ends = list(np.flatnonzero(edges == -1) + 1)
+    if mask[0]:
+        starts.insert(0, 0)
+    if mask[-1]:
+        ends.append(len(mask))
+
+    spans = [
+        (float(s * hop_sec), float(e * hop_sec + frame_sec))
+        for s, e in zip(starts, ends)
+    ]
+
+    merged: list[tuple[float, float]] = []
+    for start, end in spans:
+        if merged and start - merged[-1][1] <= DUAL_MIN_GAP_SEC:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+
+    return [(s, e) for s, e in merged if e - s >= DUAL_MIN_SPEECH_SEC]
 
 
 # ── pyannote backend ───────────────────────────────────────────────────────────

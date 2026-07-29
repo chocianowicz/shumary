@@ -94,3 +94,95 @@ def test_transcribe_help_lists_date_option():
     result = runner.invoke(app, ["transcribe", "--help"])
     assert result.exit_code == 0
     assert "--date" in result.output
+
+
+# ── record ─────────────────────────────────────────────────────────────────────
+
+def test_record_help():
+    result = runner.invoke(app, ["record", "--help"])
+    assert result.exit_code == 0
+    assert "system audio" in result.output
+    assert "--transcribe" in result.output
+
+
+def test_transcribe_help_lists_dual_channel_flag():
+    result = runner.invoke(app, ["transcribe", "--help"])
+    assert result.exit_code == 0
+    assert "--dual-channel" in result.output
+    assert "--no-dual-channel" in result.output
+
+
+def test_record_writes_to_the_given_path(tmp_path, monkeypatch):
+    from shumary import recorder
+
+    target = tmp_path / "call.wav"
+    captured = {}
+
+    def _fake_record(out):
+        captured["out"] = out
+        out.write_bytes(b"pcm")
+        return out
+
+    monkeypatch.setattr(recorder, "record", _fake_record)
+
+    result = runner.invoke(app, ["record", str(target)])
+
+    assert result.exit_code == 0
+    assert captured["out"] == target
+
+
+def test_record_into_a_directory_gets_a_timestamped_name(tmp_path, monkeypatch):
+    from shumary import recorder
+
+    captured = {}
+    monkeypatch.setattr(recorder, "record", lambda out: captured.setdefault("out", out))
+
+    result = runner.invoke(app, ["record", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["out"].parent == tmp_path
+    assert captured["out"].name.startswith("recording-")
+
+
+def test_record_adds_a_wav_extension_when_missing(tmp_path, monkeypatch):
+    from shumary import recorder
+
+    captured = {}
+    monkeypatch.setattr(recorder, "record", lambda out: captured.setdefault("out", out))
+
+    runner.invoke(app, ["record", str(tmp_path / "call")])
+
+    assert captured["out"].suffix == ".wav"
+
+
+def test_record_reports_failure_as_exit_code_one(tmp_path, monkeypatch):
+    from shumary import recorder
+    from shumary.errors import ShumaryError
+
+    def _fail(out):
+        raise ShumaryError("no permission")
+
+    monkeypatch.setattr(recorder, "record", _fail)
+
+    result = runner.invoke(app, ["record", str(tmp_path / "call.wav")])
+
+    assert result.exit_code == 1
+    assert "no permission" in result.output
+
+
+def test_record_can_chain_into_transcription(tmp_path, monkeypatch):
+    from shumary import pipeline, recorder
+
+    target = tmp_path / "call.wav"
+    transcribed = {}
+
+    monkeypatch.setattr(recorder, "record", lambda out: out)
+    monkeypatch.setattr(
+        pipeline, "process_file",
+        lambda wav, **kw: transcribed.setdefault("wav", wav) or wav.with_suffix(".md"),
+    )
+
+    result = runner.invoke(app, ["record", str(target), "--transcribe"])
+
+    assert result.exit_code == 0
+    assert transcribed["wav"] == target
