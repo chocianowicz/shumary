@@ -57,15 +57,36 @@ def _patch_pipeline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         pipeline.transcribe_stage, "run",
-        lambda audio, model_name, fast=False, backend=None: _fake_transcription(),
+        lambda audio, model_name, fast=False, backend=None, progress=None: _fake_transcription(),
     )
     monkeypatch.setattr(pipeline, "pick_backend", lambda override=None: None)
-    monkeypatch.setattr(pipeline.align_stage, "run", lambda segments, turns: [
-        AlignedSegment(s.start, s.end, s.text, s.avg_logprob, s.no_speech_prob,
-                        speaker=(turns[0].speaker if turns else None))
-        for s in segments
-    ])
-    monkeypatch.setattr(pipeline.mood_stage, "run", lambda aligned, language: _fake_mood())
+    def _fake_align(segments, turns):
+        """Stand-in for align: assign each segment to its max-overlap turn.
+
+        Cruder than the real stage (no word-level splitting), but it must at
+        least route different segments to different speakers — downstream stages
+        now derive the speaker table and turn metrics from what alignment
+        actually attributed, so a stub that credits every segment to `turns[0]`
+        would make every multi-speaker fixture look like a monologue.
+        """
+        def _speaker(seg):
+            if not turns:
+                return None
+            best = max(
+                turns,
+                key=lambda t: max(0.0, min(seg.end, t.end) - max(seg.start, t.start)),
+            )
+            overlap = max(0.0, min(seg.end, best.end) - max(seg.start, best.start))
+            return best.speaker if overlap > 0 else turns[0].speaker
+
+        return [
+            AlignedSegment(s.start, s.end, s.text, s.avg_logprob, s.no_speech_prob,
+                           speaker=_speaker(s))
+            for s in segments
+        ]
+
+    monkeypatch.setattr(pipeline.align_stage, "run", _fake_align)
+    monkeypatch.setattr(pipeline.mood_stage, "run", lambda aligned, language, speakers=None: _fake_mood())
     monkeypatch.setattr(pipeline.prosody_stage, "available", lambda: False)
     monkeypatch.setattr(pipeline.render_stage, "save_transcript", lambda **kwargs: kwargs["out_path"])
 
@@ -145,7 +166,7 @@ def test_no_diarize_does_not_block_later_normal_run(tmp_path, monkeypatch):
 
     diarize_calls = []
 
-    def _fake_diarize_run(audio):
+    def _fake_diarize_run(audio, progress=None):
         diarize_calls.append(audio)
         return DiarizationResult(turns=(Turn(0.0, 4.0, "SPEAKER_00"),), backend="resemblyzer")
 
@@ -262,7 +283,7 @@ def test_single_speaker_does_not_run_interaction_stage(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         pipeline.diarize_stage, "run",
-        lambda audio: DiarizationResult(turns=(Turn(0.0, 4.0, "SPEAKER_00"),), backend="resemblyzer"),
+        lambda audio, progress=None: DiarizationResult(turns=(Turn(0.0, 4.0, "SPEAKER_00"),), backend="resemblyzer"),
     )
 
     captured = {}
@@ -290,7 +311,7 @@ def test_multi_speaker_runs_and_caches_interaction_stage(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         pipeline.diarize_stage, "run",
-        lambda audio: DiarizationResult(turns=turns, backend="pyannote"),
+        lambda audio, progress=None: DiarizationResult(turns=turns, backend="pyannote"),
     )
 
     captured = {}
@@ -321,7 +342,7 @@ def test_interaction_cache_invalidated_when_diarize_recomputed(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         pipeline.diarize_stage, "run",
-        lambda audio: DiarizationResult(turns=turns, backend="pyannote"),
+        lambda audio, progress=None: DiarizationResult(turns=turns, backend="pyannote"),
     )
     monkeypatch.setattr(pipeline.render_stage, "save_transcript", lambda **kwargs: kwargs["out_path"])
 
@@ -359,7 +380,7 @@ def test_prosody_runs_and_caches_when_available(tmp_path, monkeypatch):
     slug = "memo"
 
     monkeypatch.setattr(pipeline.prosody_stage, "available", lambda: True)
-    monkeypatch.setattr(pipeline.prosody_stage, "run", lambda wav, segments: _fake_prosody_result())
+    monkeypatch.setattr(pipeline.prosody_stage, "run", lambda wav, segments, speakers=None: _fake_prosody_result())
 
     captured = {}
 
@@ -408,7 +429,7 @@ def test_prosody_cache_invalidated_when_align_recomputed(tmp_path, monkeypatch):
     slug = "memo"
 
     monkeypatch.setattr(pipeline.prosody_stage, "available", lambda: True)
-    monkeypatch.setattr(pipeline.prosody_stage, "run", lambda wav, segments: _fake_prosody_result())
+    monkeypatch.setattr(pipeline.prosody_stage, "run", lambda wav, segments, speakers=None: _fake_prosody_result())
     monkeypatch.setattr(pipeline.render_stage, "save_transcript", lambda **kwargs: kwargs["out_path"])
 
     pipeline.process_file(audio, no_diarize=True)
@@ -502,3 +523,50 @@ def test_progress_failure_event_carries_message():
     events = []
     pipeline._Progress(events.append).failed("boom")
     assert events == [{"event": "error", "message": "boom", "pct": 0.0}]
+
+
+# ── sub-stage progress ────────────────────────────────────────────────────────
+
+def test_substage_emits_inside_the_stages_own_span():
+    events = []
+    p = pipeline._Progress(lambda e: events.append(e))
+    p.start("decode"); p.done("decode")      # 2%
+    p.start("transcribe")
+    for f in (0.25, 0.5, 0.75):
+        p.substage("transcribe", f)
+    pcts = [round(e["pct"] * 100) for e in events if e.get("status") == "progress"]
+    # transcribe spans 2%..72%, so quarter-way is ~19.5%, half ~37%, three-quarters ~54.5%
+    assert pcts == [20, 37, 55]
+
+
+def test_substage_never_reaches_the_next_stage():
+    events = []
+    p = pipeline._Progress(lambda e: events.append(e))
+    p.start("decode"); p.done("decode")
+    p.substage("transcribe", 1.0)
+    assert round(events[-1]["pct"] * 100) == 72     # exactly the boundary, never past
+    p.substage("transcribe", 5.0)                   # clamped
+    assert round(events[-1]["pct"] * 100) == 72
+
+
+def test_substage_is_monotonic_and_throttled():
+    events = []
+    p = pipeline._Progress(lambda e: events.append(e))
+    p.start("transcribe")
+    p.substage("transcribe", 0.5)
+    before = len(events)
+    p.substage("transcribe", 0.4)   # backwards — must not emit
+    p.substage("transcribe", 0.5)   # same percent — must not emit
+    assert len(events) == before
+
+
+def test_substage_is_silent_without_a_sink():
+    p = pipeline._Progress(None)
+    p.substage("transcribe", 0.5)   # must not raise
+
+
+def test_substage_ignores_unknown_stages():
+    events = []
+    p = pipeline._Progress(lambda e: events.append(e))
+    p.substage("not-a-stage", 0.5)
+    assert events == []

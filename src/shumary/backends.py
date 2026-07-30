@@ -10,13 +10,15 @@ Three interchangeable Whisper backends, normalized to `TranscriptionResult`:
 (`--backend` flag / `SHUMARY_BACKEND` env var).
 """
 
+import io
 import os
 import platform
 import re
 import sys
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from shumary.config import HALLUCINATION_MIN_DURATION_SEC, HALLUCINATION_NO_SPEECH
 from shumary.errors import ShumaryError
@@ -65,12 +67,66 @@ OPENAI_MODEL_NAMES: dict[str, str] = {
 }
 
 
+ProgressFn = Callable[[float], None]
+
+
 class TranscribeBackend(Protocol):
     name: str  # "mlx" | "faster" | "openai"
 
     def available(self) -> bool: ...
 
-    def transcribe(self, wav: Path, model_name: str, *, fast: bool) -> TranscriptionResult: ...
+    def transcribe(
+        self, wav: Path, model_name: str, *, fast: bool,
+        progress: ProgressFn | None = None,
+    ) -> TranscriptionResult: ...
+
+
+@contextmanager
+def _tqdm_reporter(report: ProgressFn | None):
+    """Route Whisper's own tqdm counter to `report` as a 0..1 fraction.
+
+    `mlx-whisper` and `openai-whisper` are blocking calls with no callback, but
+    both drive a tqdm bar over audio frames internally. Subclassing tqdm and
+    swapping it in for the duration of the call turns that bar into the only
+    real progress signal those backends expose.
+
+    The bar's own output is discarded: it would otherwise write to stderr, which
+    is the channel `--progress-json` uses. Any failure here is non-fatal — the
+    caller simply gets no sub-stage progress, which is the old behaviour.
+    """
+    if report is None:
+        yield
+        return
+
+    try:
+        import tqdm as tqdm_mod
+    except ImportError:
+        yield
+        return
+
+    real = tqdm_mod.tqdm
+
+    class _Reporting(real):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            # Count, but never draw: stderr carries the JSON progress stream.
+            kwargs["disable"] = False
+            kwargs["file"] = io.StringIO()
+            super().__init__(*args, **kwargs)
+
+        def update(self, n=1):
+            result = super().update(n)
+            try:
+                if self.total:
+                    report(min(1.0, self.n / self.total))
+            except Exception:
+                pass
+            return result
+
+    tqdm_mod.tqdm = _Reporting
+    try:
+        yield
+    finally:
+        tqdm_mod.tqdm = real
 
 
 def _strip_word(text: str) -> str:
@@ -169,7 +225,10 @@ class OpenaiBackend:
         except ImportError:
             return False
 
-    def transcribe(self, wav: Path, model_name: str, *, fast: bool) -> TranscriptionResult:
+    def transcribe(
+        self, wav: Path, model_name: str, *, fast: bool,
+        progress: ProgressFn | None = None,
+    ) -> TranscriptionResult:
         from shumary.modelhub import whisper_model
 
         mapped = OPENAI_MODEL_NAMES.get(model_name, model_name)
@@ -183,7 +242,8 @@ class OpenaiBackend:
         if fast:
             opts["temperature"] = 0.0
 
-        result = model.transcribe(str(wav), **opts)
+        with _tqdm_reporter(progress):
+            result = model.transcribe(str(wav), **opts)
 
         language = result.get("language", "unknown")
         text = result.get("text", "")
@@ -222,7 +282,10 @@ class FasterBackend:
         except ImportError:
             return False
 
-    def transcribe(self, wav: Path, model_name: str, *, fast: bool) -> TranscriptionResult:
+    def transcribe(
+        self, wav: Path, model_name: str, *, fast: bool,
+        progress: ProgressFn | None = None,
+    ) -> TranscriptionResult:
         model = _faster_model(FASTER_MODEL_NAMES.get(model_name, model_name))
 
         opts: dict = dict(
@@ -240,7 +303,10 @@ class FasterBackend:
         # the stage, before the model/process moves on.
         segments = []
         all_text_parts = []
+        total_sec = float(getattr(info, "duration", 0.0) or 0.0)
         for s in seg_iter:
+            if progress and total_sec > 0:
+                progress(min(1.0, float(s.end) / total_sec))
             words = _normalize_words(s.words or [])
             segments.append(
                 Segment(
@@ -285,7 +351,10 @@ class MlxBackend:
         except ImportError:
             return False
 
-    def transcribe(self, wav: Path, model_name: str, *, fast: bool) -> TranscriptionResult:
+    def transcribe(
+        self, wav: Path, model_name: str, *, fast: bool,
+        progress: ProgressFn | None = None,
+    ) -> TranscriptionResult:
         import mlx_whisper  # type: ignore[import-untyped]
 
         repo = KNOWN_REPOS.get(model_name, model_name)
@@ -297,8 +366,13 @@ class MlxBackend:
         )
         if fast:
             opts["temperature"] = 0.0
+        if progress is not None:
+            # mlx-whisper only creates its frame counter when `verbose is False`
+            # exactly — the default of None disables it.
+            opts["verbose"] = False
 
-        result = mlx_whisper.transcribe(str(wav), **opts)
+        with _tqdm_reporter(progress):
+            result = mlx_whisper.transcribe(str(wav), **opts)
 
         language = result.get("language", "unknown")
         text = result.get("text", "")

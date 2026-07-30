@@ -1,5 +1,7 @@
 """Tests for cache.py — disk-backed stage cache."""
 
+import json
+
 import pytest
 from shumary import cache as cache_mod
 from shumary.errors import ShumaryError
@@ -196,16 +198,20 @@ def test_ensure_manifest_first_contact_no_existing_files_no_invalidation(tmp_pat
     assert invalidated == []
 
 
-def test_descendants_of_whisper_includes_align_mood_and_prosody():
-    assert set(cache_mod.descendants_of("whisper")) == {"align", "mood", "prosody"}
+def test_descendants_of_whisper_reach_every_derived_stage():
+    """New segments change alignment, which changes every stage downstream of it
+    — including interaction, whose turns are pruned against aligned speech."""
+    assert set(cache_mod.descendants_of("whisper")) == {
+        "align", "mood", "prosody", "interaction",
+    }
 
 
 def test_descendants_of_diarize_includes_align_mood_interaction_and_prosody():
     assert set(cache_mod.descendants_of("diarize")) == {"align", "mood", "interaction", "prosody"}
 
 
-def test_descendants_of_align_includes_mood_and_prosody():
-    assert set(cache_mod.descendants_of("align")) == {"mood", "prosody"}
+def test_descendants_of_align_includes_mood_prosody_and_interaction():
+    assert set(cache_mod.descendants_of("align")) == {"mood", "prosody", "interaction"}
 
 
 def test_descendants_of_mood_is_empty():
@@ -366,3 +372,73 @@ def test_mark_done_removes_split_channel_wavs(tmp_path, monkeypatch):
 
     assert not any((d / n).exists() for n in ("audio.wav", "left.wav", "right.wav"))
     assert cache_mod.is_done("meeting")
+
+
+def test_ensure_manifest_metrics_version_bump_invalidates_only_metric_stages(tmp_path):
+    """Derived metrics changed without the transcription or turns changing:
+    recompute the cheap analysis stages, keep the expensive transcription."""
+    audio = tmp_path / "memo.m4a"
+    audio.write_bytes(b"audio-bytes")
+
+    cache_mod.ensure_manifest("slug-metrics", audio, "large", False)
+    for stage in ("whisper", "diarize", "align", "mood", "interaction", "prosody"):
+        cache_mod.write("slug-metrics", stage, {"stage": stage})
+
+    # Simulate a manifest written by an older version.
+    manifest = cache_mod.read_manifest("slug-metrics")
+    manifest["metrics_version"] = cache_mod.METRICS_VERSION - 1
+    cache_mod._manifest_path("slug-metrics").write_text(json.dumps(manifest), encoding="utf-8")
+
+    invalidated = cache_mod.ensure_manifest("slug-metrics", audio, "large", False)
+
+    assert set(invalidated) == {"mood", "interaction", "prosody"}
+    for stage in ("mood", "interaction", "prosody"):
+        assert not cache_mod.is_cached("slug-metrics", stage), stage
+    # The expensive stages survive — nothing about the audio or the turns changed.
+    for stage in ("whisper", "diarize", "align"):
+        assert cache_mod.is_cached("slug-metrics", stage), stage
+    assert cache_mod.read_manifest("slug-metrics")["metrics_version"] == cache_mod.METRICS_VERSION
+
+
+def test_ensure_manifest_treats_missing_metrics_version_as_stale(tmp_path):
+    """Manifests written before metrics were versioned report `null` overlaps for
+    dual-channel recordings, so they must be recomputed."""
+    audio = tmp_path / "memo.m4a"
+    audio.write_bytes(b"audio-bytes")
+
+    cache_mod.ensure_manifest("slug-legacy", audio, "large", False)
+    cache_mod.write("slug-legacy", "interaction", {"backend": "dual-channel+pyannote"})
+
+    manifest = cache_mod.read_manifest("slug-legacy")
+    del manifest["metrics_version"]
+    cache_mod._manifest_path("slug-legacy").write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert cache_mod.ensure_manifest("slug-legacy", audio, "large", False) == ["interaction"]
+
+
+def test_align_invalidation_also_drops_interaction(tmp_path):
+    """Interaction measures turns pruned against aligned speech, so a new
+    alignment means the cached turn metrics describe a turn set that is gone."""
+    cache_mod.write("slug-dag", "align", {"segments": []})
+    cache_mod.write("slug-dag", "interaction", {"backend": "dual-channel+pyannote"})
+
+    removed = cache_mod.invalidate_stage("slug-dag", "align")
+
+    assert "interaction" in removed
+    assert not cache_mod.is_cached("slug-dag", "interaction")
+
+
+def test_model_change_invalidates_interaction_through_align(tmp_path):
+    """The transitive path whisper -> align -> interaction must hold: a different
+    Whisper model changes the segments, which changes the pruning."""
+    audio = tmp_path / "memo.m4a"
+    audio.write_bytes(b"audio-bytes")
+
+    cache_mod.ensure_manifest("slug-model-int", audio, "large", False)
+    for stage in ("whisper", "align", "interaction"):
+        cache_mod.write("slug-model-int", stage, {"stage": stage})
+
+    invalidated = cache_mod.ensure_manifest("slug-model-int", audio, "turbo", False)
+
+    assert "interaction" in invalidated
+    assert not cache_mod.is_cached("slug-model-int", "interaction")

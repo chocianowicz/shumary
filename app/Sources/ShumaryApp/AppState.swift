@@ -4,8 +4,23 @@ import Foundation
 enum Activity {
     case idle
     case recording(startedAt: Date)
-    case transcribing(session: String, pct: Double)
+    case transcribing(session: String, pct: Double, stage: String? = nil)
 }
+
+/// The verb shown for each engine stage. The percentage alone is not enough:
+/// most of the wait is spent in two stages, and saying "transcribing" while the
+/// engine is actually separating speakers makes a slow diarization look like a
+/// stalled transcription.
+private let stageVerbs: [String: String] = [
+    "decode": "preparing",
+    "transcribe": "transcribing",
+    "diarize": "diarizing",
+    "align": "aligning",
+    "mood": "analyzing",
+    "interaction": "analyzing",
+    "prosody": "analyzing",
+    "render": "writing",
+]
 
 final class AppState {
     /// Called on every change so the menu can redraw. Always on the main thread.
@@ -38,8 +53,9 @@ final class AppState {
             text = lastError.map { "failed — \($0)" } ?? "idle"
         case .recording(let startedAt):
             text = "recording · \(Self.clock(Date().timeIntervalSince(startedAt)))"
-        case .transcribing(_, let pct):
-            text = "transcribing · \(Int(pct * 100))%"
+        case .transcribing(_, let pct, let stage):
+            let verb = stage.flatMap { stageVerbs[$0] } ?? "transcribing"
+            text = "\(verb) · \(Int(pct * 100))%"
         }
 
         if queueCount > 0 {

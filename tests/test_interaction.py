@@ -1,5 +1,7 @@
 """Tests for stages/interaction.py — turn-taking / interaction metrics (Spec 5)."""
 
+import pytest
+
 from shumary.config import LATENCY_CAP_SEC, UTTERANCE_MERGE_GAP
 from shumary.models import InteractionMetrics, SpeakerInteraction, Turn
 from shumary.stages import interaction
@@ -132,6 +134,30 @@ def test_resemblyzer_backend_overlap_fields_are_none():
     assert m.overlap_count is None
     assert m.overlap_total_sec is None
     assert m.backend == "resemblyzer"
+
+
+@pytest.mark.parametrize("backend", ["dual-channel+pyannote", "dual-channel+resemblyzer", "dual-channel"])
+def test_overlap_detected_for_dual_channel_backends(backend):
+    """Two independent channels overlap by construction — the mic and the system
+    side are separate timelines, which is the whole point of two-channel capture.
+    Reporting None here would disable interruption metrics for the one backend
+    that can measure them."""
+    turns = [
+        Turn(0.0, 10.0, "Me"),
+        Turn(9.0, 15.0, "SPEAKER_00"),  # 1s of genuine simultaneous speech
+    ]
+    m = interaction.run(turns, backend)
+    assert m.overlap_count == 1
+    assert m.overlap_total_sec == 1.0
+    assert m.backend == backend
+
+
+def test_user_flag_backend_overlap_fields_are_none():
+    """--solo produces one synthetic turn spanning the file; there is no second
+    timeline to overlap with."""
+    m = interaction.run([Turn(0.0, 5.0, "SPEAKER_00"), Turn(5.0, 9.0, "SPEAKER_01")], "user-flag")
+    assert m.overlap_count is None
+    assert m.overlap_total_sec is None
 
 
 # ── Interruption vs back-channel discrimination ───────────────────────────────────

@@ -36,11 +36,31 @@ MANIFEST_FILE = "manifest.json"
 # `pipeline_version` check meaningful.
 PIPELINE_VERSION = 5
 
+# Bumped when *derived metrics* change without the transcription or the turns
+# changing. Invalidates the cheap analysis stages only — unlike PIPELINE_VERSION,
+# which invalidates whisper and therefore the entire expensive tail.
+#
+# v2: overlap/interruption counts are no longer suppressed for dual-channel
+# backends, and turns with no transcribed speech no longer contribute to
+# turn-taking metrics. Cached v1 entries report `null` overlaps for exactly the
+# backend where overlap is measurable.
+# v3: mood and prosody take the accepted-speaker set, so their per-speaker tables
+# no longer list disqualified labels; the filler verdict is split into
+# hesitations vs discourse markers, and `это` left the Russian marker lexicon.
+METRICS_VERSION = 3
+
+# Stages recomputed on a METRICS_VERSION bump.
+METRICS_STAGES: tuple[str, ...] = ("mood", "interaction", "prosody")
+
 # Stage dependency graph: stage -> stages that must be invalidated if it is.
 STAGE_DEPENDENTS: dict[str, list[str]] = {
     "whisper": ["align"],
     "diarize": ["align", "interaction"],
-    "align": ["mood", "prosody"],
+    # `interaction` depends on align as well as on diarize: the turns it measures
+    # are pruned against what alignment attributed, so different segments mean
+    # different turns. Without this edge a model change would invalidate align
+    # but leave interaction reporting metrics for a turn set that no longer exists.
+    "align": ["mood", "prosody", "interaction"],
     "mood": [],
     "interaction": [],
     "prosody": [],
@@ -194,6 +214,7 @@ def write_manifest(
         "fast": fast,
         "dual_source": dual_source,
         "pipeline_version": PIPELINE_VERSION,
+        "metrics_version": METRICS_VERSION,
     }
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -268,13 +289,18 @@ def ensure_manifest(
         or manifest.get("pipeline_version") != PIPELINE_VERSION
     )
     dual_changed = bool(manifest.get("dual_source", False)) != bool(dual_source)
+    # Absent on manifests written before metrics were versioned — treat as v1.
+    metrics_changed = manifest.get("metrics_version", 1) != METRICS_VERSION
 
-    if params_changed or dual_changed:
+    if params_changed or dual_changed or metrics_changed:
         invalidated: list[str] = []
         if params_changed:
             invalidated += invalidate_stage(slug, "whisper")
         if dual_changed:
             invalidated += [s for s in invalidate_stage(slug, "diarize") if s not in invalidated]
+        if metrics_changed:
+            for stage in METRICS_STAGES:
+                invalidated += [s for s in invalidate_stage(slug, stage) if s not in invalidated]
         write_manifest(
             slug, audio_hash=audio_hash, model_name=model_name,
             fast=fast, dual_source=dual_source,

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from shumary.models import DiarizationResult, Turn
+from shumary.models import AlignedSegment, DiarizationResult, Turn
 from shumary.stages import diarize
 
 
@@ -50,7 +50,7 @@ def test_run_falls_back_to_resemblyzer_when_pyannote_fails_at_runtime(monkeypatc
     sentinel_pipeline = object()
 
     monkeypatch.setattr(diarize, "diarization_pipeline", lambda: sentinel_pipeline)
-    monkeypatch.setattr(diarize, "_run_pyannote", lambda audio, pipeline: None)
+    monkeypatch.setattr(diarize, "_run_pyannote", lambda audio, pipeline, progress=None: None)
 
     fallback_turns = [Turn(start=0.0, end=5.0, speaker="SPEAKER_00")]
     monkeypatch.setattr(diarize, "_run_resemblyzer", lambda audio: fallback_turns)
@@ -66,7 +66,7 @@ def test_run_returns_none_when_pyannote_and_resemblyzer_both_fail(monkeypatch):
     sentinel_pipeline = object()
 
     monkeypatch.setattr(diarize, "diarization_pipeline", lambda: sentinel_pipeline)
-    monkeypatch.setattr(diarize, "_run_pyannote", lambda audio, pipeline: None)
+    monkeypatch.setattr(diarize, "_run_pyannote", lambda audio, pipeline, progress=None: None)
     monkeypatch.setattr(diarize, "_run_resemblyzer", lambda audio: None)
 
     assert diarize.run(Path("/tmp/fake.wav")) is None
@@ -198,7 +198,7 @@ def test_run_uses_pyannote_when_it_succeeds(monkeypatch):
     pyannote_turns = [Turn(start=0.0, end=5.0, speaker="SPEAKER_00")]
 
     monkeypatch.setattr(diarize, "diarization_pipeline", lambda: sentinel_pipeline)
-    monkeypatch.setattr(diarize, "_run_pyannote", lambda audio, pipeline: pyannote_turns)
+    monkeypatch.setattr(diarize, "_run_pyannote", lambda audio, pipeline, progress=None: pyannote_turns)
 
     def _fail_resemblyzer(audio):
         raise AssertionError("resemblyzer should not run when pyannote succeeds")
@@ -210,3 +210,144 @@ def test_run_uses_pyannote_when_it_succeeds(monkeypatch):
     assert result is not None
     assert result.backend == "pyannote"
     assert result.turns == tuple(pyannote_turns)
+
+
+# ── speaker stats derived from transcribed speech ──────────────────────────────
+
+def _seg(start, end, speaker, text="words here"):
+    return AlignedSegment(
+        start=start, end=end, text=text,
+        avg_logprob=-0.2, no_speech_prob=0.05, speaker=speaker,
+    )
+
+
+def test_speaker_stats_from_speech_measures_attributed_speech_not_turns():
+    """The mic label's turns come from an energy gate, so they can be many times
+    longer than what the speaker actually said. The reported share must follow
+    the transcript."""
+    aligned = [
+        _seg(0.0, 2.0, "Me"),
+        _seg(2.0, 8.0, "SPEAKER_00"),
+    ]
+    stats = diarize.speaker_stats_from_speech(aligned)
+    assert stats is not None
+    by_label = {s.label: s for s in stats.speakers}
+    assert by_label["Me"].duration_sec == 2.0
+    assert by_label["Me"].pct == 25
+    assert by_label["SPEAKER_00"].pct == 75
+
+
+def test_speaker_stats_from_speech_drops_labels_with_no_speech():
+    """A phantom cluster that carried no words is not a participant."""
+    aligned = [
+        _seg(0.0, 5.0, "SPEAKER_00"),
+        _seg(5.0, 5.2, "SPEAKER_01", text="   "),   # whitespace only
+    ]
+    stats = diarize.speaker_stats_from_speech(aligned)
+    assert stats.count == 1
+    assert [s.label for s in stats.speakers] == ["SPEAKER_00"]
+
+
+def test_speaker_stats_from_speech_ignores_unattributed_labels():
+    aligned = [
+        _seg(0.0, 4.0, "SPEAKER_00"),
+        _seg(4.0, 6.0, "SPEAKER_??"),
+        _seg(6.0, 7.0, None),
+    ]
+    stats = diarize.speaker_stats_from_speech(aligned)
+    assert stats.count == 1
+    assert stats.speakers[0].pct == 100
+
+
+def test_speaker_stats_from_speech_does_not_double_count_overlapping_segments():
+    """Segments from different Whisper segments can abut or overlap slightly;
+    nobody should be credited twice for the same moment."""
+    aligned = [
+        _seg(0.0, 3.0, "SPEAKER_00"),
+        _seg(2.0, 4.0, "SPEAKER_00"),   # 1s of overlap with the previous
+    ]
+    stats = diarize.speaker_stats_from_speech(aligned)
+    assert stats.speakers[0].duration_sec == 4.0
+
+
+def test_speaker_stats_from_speech_none_without_segments():
+    assert diarize.speaker_stats_from_speech(None) is None
+    assert diarize.speaker_stats_from_speech([]) is None
+
+
+# ── pruning turns with no transcribed speech ──────────────────────────────────
+
+def test_prune_unvoiced_turns_drops_turns_alignment_gave_no_words():
+    turns = [
+        Turn(start=0.0, end=2.0, speaker="Me"),      # real speech
+        Turn(start=4.0, end=9.0, speaker="Me"),      # keyboard: no words landed
+        Turn(start=2.0, end=4.0, speaker="SPEAKER_00"),
+    ]
+    aligned = [_seg(0.0, 2.0, "Me"), _seg(2.0, 4.0, "SPEAKER_00")]
+
+    kept = diarize.prune_unvoiced_turns(turns, aligned)
+    assert [(t.start, t.speaker) for t in kept] == [(0.0, "Me"), (2.0, "SPEAKER_00")]
+
+
+def test_prune_unvoiced_turns_matches_speaker_as_well_as_time():
+    """A turn is not voiced just because *somebody* spoke during it — this is
+    exactly the mic-turn-over-remote-speech case."""
+    turns = [
+        Turn(start=0.0, end=5.0, speaker="Me"),          # mic energy over their speech
+        Turn(start=0.0, end=5.0, speaker="SPEAKER_00"),  # who actually spoke
+    ]
+    aligned = [_seg(0.0, 5.0, "SPEAKER_00")]
+
+    kept = diarize.prune_unvoiced_turns(turns, aligned)
+    assert [t.speaker for t in kept] == ["SPEAKER_00"]
+
+
+def test_prune_unvoiced_turns_keeps_everything_rather_than_return_nothing():
+    """If no turn has evidence, the evidence is missing — not every turn spurious."""
+    turns = [Turn(start=0.0, end=5.0, speaker="Me")]
+    aligned = [_seg(9.0, 10.0, "SPEAKER_00")]
+
+    assert diarize.prune_unvoiced_turns(turns, aligned) == turns
+
+
+def test_prune_unvoiced_turns_keeps_short_backchannel():
+    """250 ms of genuine speech must survive — backchannel is what makes the
+    turn-taking metrics meaningful."""
+    turns = [Turn(start=1.0, end=1.25, speaker="Me")]
+    aligned = [_seg(1.0, 1.25, "Me", text="mhm")]
+
+    assert diarize.prune_unvoiced_turns(turns, aligned) == turns
+
+
+def test_prune_unvoiced_turns_passes_through_without_evidence():
+    turns = [Turn(start=0.0, end=2.0, speaker="Me")]
+    assert diarize.prune_unvoiced_turns(turns, None) == turns
+    assert diarize.prune_unvoiced_turns(turns, []) == turns
+    # No aligned speech at all is missing evidence, not proof of silence.
+    assert diarize.prune_unvoiced_turns(turns, [_seg(0.0, 1.0, None)]) == turns
+
+
+def test_speaker_stats_from_speech_drops_single_word_phantom_cluster():
+    """Diarization sometimes emits a cluster holding one low-confidence word.
+    Counting it as a participant corrupts the headline speaker count."""
+    aligned = [
+        _seg(0.0, 60.0, "SPEAKER_00"),
+        _seg(60.0, 120.0, "SPEAKER_01"),
+        _seg(120.0, 121.4, "SPEAKER_02", text="ага"),   # 1.4s — below the floor
+    ]
+    stats = diarize.speaker_stats_from_speech(aligned)
+    assert stats.count == 2
+    assert "SPEAKER_02" not in {s.label for s in stats.speakers}
+
+
+def test_prune_unvoiced_turns_drops_turns_of_disqualified_labels():
+    """A label dropped from the speaker table must stop contributing turn
+    metrics too, or it still shows up as interruptions and latencies."""
+    turns = [
+        Turn(start=0.0, end=10.0, speaker="SPEAKER_00"),
+        Turn(start=10.0, end=11.4, speaker="SPEAKER_02"),
+    ]
+    aligned = [_seg(0.0, 10.0, "SPEAKER_00"), _seg(10.0, 11.4, "SPEAKER_02", text="ага")]
+
+    kept = diarize.prune_unvoiced_turns(turns, aligned, keep_labels={"SPEAKER_00"})
+    assert [t.speaker for t in kept] == ["SPEAKER_00"]

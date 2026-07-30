@@ -137,7 +137,7 @@ def test_run_dual_merges_mic_and_remote_turns_in_time_order(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         diarize, "run",
-        lambda path: DiarizationResult(
+        lambda path, progress=None: DiarizationResult(
             turns=(Turn(start=4.0, end=6.0, speaker="SPEAKER_00"),), backend="pyannote"
         ),
     )
@@ -166,7 +166,7 @@ def test_run_dual_skips_diarization_when_nothing_played(tmp_path, monkeypatch):
 def test_run_dual_returns_none_when_both_channels_are_empty(tmp_path, monkeypatch):
     left = write_wav(tmp_path / "left.wav", [])
     right = write_wav(tmp_path / "right.wav", [])
-    monkeypatch.setattr(diarize, "run", lambda path: None)
+    monkeypatch.setattr(diarize, "run", lambda path, progress=None: None)
 
     assert diarize.run_dual(left, right, mic_label="You") is None
 
@@ -177,7 +177,7 @@ def test_run_dual_keeps_remote_turns_when_the_mic_is_silent(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         diarize, "run",
-        lambda path: DiarizationResult(
+        lambda path, progress=None: DiarizationResult(
             turns=(Turn(start=1.0, end=5.0, speaker="SPEAKER_00"),), backend="resemblyzer"
         ),
     )
@@ -190,7 +190,52 @@ def test_run_dual_keeps_remote_turns_when_the_mic_is_silent(tmp_path, monkeypatc
 def test_run_dual_labels_the_mic_with_the_requested_name(tmp_path, monkeypatch):
     left = write_wav(tmp_path / "left.wav", [(1.0, 3.0)])
     right = write_wav(tmp_path / "right.wav", [])
-    monkeypatch.setattr(diarize, "run", lambda path: None)
+    monkeypatch.setattr(diarize, "run", lambda path, progress=None: None)
 
     result = diarize.run_dual(left, right, mic_label="Denis")
     assert {t.speaker for t in result.turns} == {"Denis"}
+
+
+# ── onset gate: sustained speech vs transients ────────────────────────────────
+
+def test_mic_gate_admits_sustained_speech(tmp_path):
+    left = write_wav(tmp_path / "left.wav", [(1.0, 3.0)], amplitude=0.5)
+    right = write_wav(tmp_path / "right.wav", [])
+
+    turns = diarize._mic_turns(left, right, label="Me")
+    assert spans_of(turns) == [(1.0, 3.0)]
+
+
+def test_mic_gate_rejects_transient_clicks(tmp_path):
+    """A keypress clears the release threshold but never holds the onset
+    threshold for DUAL_MIN_ONSET_SEC, so it is not a turn. Two 20 ms spikes
+    inside one smoothing window would otherwise merge into a ~0.3 s 'turn'."""
+    left = write_wav(
+        tmp_path / "left.wav",
+        [(1.00, 1.02), (1.20, 1.22), (1.40, 1.42)],
+        amplitude=0.5,
+    )
+    right = write_wav(tmp_path / "right.wav", [])
+
+    assert diarize._mic_turns(left, right, label="Me") == []
+
+
+def test_mic_gate_keeps_short_backchannel(tmp_path):
+    """A 300 ms voiced utterance is short but sustained — it must survive."""
+    left = write_wav(tmp_path / "left.wav", [(2.0, 2.3)], amplitude=0.5)
+    right = write_wav(tmp_path / "right.wav", [])
+
+    turns = diarize._mic_turns(left, right, label="Me")
+    assert len(turns) == 1
+    # Spans carry one frame of padding at the end by construction (see
+    # _spans_from_mask), so the turn is the utterance plus DUAL_FRAME_SEC.
+    assert turns[0].end - turns[0].start == pytest.approx(0.3, abs=0.08)
+
+
+def test_mic_gate_still_rejects_speaker_bleed(tmp_path):
+    """The echo margin must keep working: an attenuated copy of the system
+    channel never beats its own source, even though it is sustained."""
+    left = write_wav(tmp_path / "left.wav", [(1.0, 4.0)], amplitude=0.02)
+    right = write_wav(tmp_path / "right.wav", [(1.0, 4.0)], amplitude=0.5)
+
+    assert diarize._mic_turns(left, right, label="Me") == []

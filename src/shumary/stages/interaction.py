@@ -20,6 +20,20 @@ from shumary.config import (
 )
 from shumary.models import InteractionMetrics, SpeakerInteraction, Turn
 
+# Backends whose turns partition a single timeline: they cannot express
+# simultaneous speech, so overlap and interruption counts are not merely zero
+# but *unknowable*, and are reported as None.
+#
+# Every other backend can. `pyannote` may emit genuinely overlapping turns, and
+# any `dual-channel*` backend overlaps by construction — the mic and the system
+# channel are independent timelines, which is the whole reason two-channel
+# capture makes interruptions measurable at all.
+NON_OVERLAPPING_BACKENDS = frozenset({"resemblyzer", "user-flag"})
+
+
+def overlap_capable(backend: str) -> bool:
+    return backend not in NON_OVERLAPPING_BACKENDS
+
 
 def run(turns: list[Turn], backend: str) -> InteractionMetrics:
     sorted_turns = sorted(turns, key=lambda t: t.start)
@@ -147,9 +161,9 @@ def _overlaps_and_interruptions(
     interruptions_made: dict[str, int] = defaultdict(int)
     interruptions_received: dict[str, int] = defaultdict(int)
 
-    if backend != "pyannote":
-        # Resemblyzer turns are produced by partitioning a single timeline —
-        # they cannot overlap by construction.
+    if not overlap_capable(backend):
+        # Turns produced by partitioning a single timeline cannot overlap, so
+        # there is nothing to count — see NON_OVERLAPPING_BACKENDS.
         return None, None, dict(interruptions_made), dict(interruptions_received)
 
     overlap_count = 0

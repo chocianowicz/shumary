@@ -92,7 +92,7 @@ final class Engine {
     func transcribe(
         folder: URL,
         audio: URL,
-        onProgress: @escaping (Double) -> Void,
+        onProgress: @escaping (Double, String?) -> Void,
         onFinish: @escaping (Result<Void, EngineError>) -> Void
     ) -> Job? {
         guard let cliPath else {
@@ -130,7 +130,8 @@ final class Engine {
                     failure = message
                 }
                 if let pct = event["pct"] as? Double {
-                    DispatchQueue.main.async { onProgress(pct) }
+                    let stage = event["stage"] as? String
+                    DispatchQueue.main.async { onProgress(pct, stage) }
                 }
             }
         }

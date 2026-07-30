@@ -13,7 +13,8 @@ def run(
     *,
     fast: bool = False,
     backend: TranscribeBackend | None = None,
+    progress=None,
 ) -> TranscriptionResult:
     backend = backend or pick_backend()
     print(f"  backend: {backend.name}")
-    return backend.transcribe(audio, model_name, fast=fast)
+    return backend.transcribe(audio, model_name, fast=fast, progress=progress)

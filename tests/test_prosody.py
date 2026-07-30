@@ -251,3 +251,26 @@ def test_aggregation_output_is_yaml_safe_even_with_numpy_inputs():
             leaves = value if isinstance(value, list) else [value]
             for leaf in leaves:
                 assert not isinstance(leaf, np.generic), f"{key} leaked numpy type"
+
+
+def test_per_speaker_aggregates_restricted_to_accepted_speakers(monkeypatch):
+    """A label disqualified from the speaker table must not get a prosody column,
+    while its segments stay in the per-segment annotations."""
+    from shumary.models import ProsodySegment, ProsodyResult
+
+    def _p(speaker, start, end, f0):
+        return ProsodySegment(
+            start=start, end=end, speaker=speaker, f0_median_hz=f0, f0_range_st=2.0,
+            energy_mean_db=-30.0, energy_range_db=10.0, jitter_local=0.02,
+            shimmer_local=0.1,
+        )
+
+    made = [
+        _p("SPEAKER_00", 0.0, 5.0, 120.0),
+        _p("SPEAKER_01", 5.0, 10.0, 180.0),
+        _p("SPEAKER_02", 10.0, 11.4, 210.0),   # the disqualified phantom
+    ]
+    accepted = {"SPEAKER_00", "SPEAKER_01"}
+    aggs = prosody._aggregate_per_speaker([p for p in made if p.speaker in accepted])
+
+    assert {a.speaker for a in aggs} == accepted

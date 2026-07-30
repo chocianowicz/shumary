@@ -861,3 +861,27 @@ def test_json_and_markdown_agree_on_the_summary(tmp_path, simple_segments, sampl
     payload = json.loads(js.read_text())
     assert payload["title"] in md.read_text()
     assert payload["date"] == "2026-07-29"
+
+
+def test_prosody_section_warns_that_energy_is_cross_channel_in_dual_mode():
+    """Mic and system arrive at different gains, so an energy difference between
+    them measures the recording chain, not the speakers."""
+    from shumary.models import ProsodyResult, SpeakerProsody
+
+    result = ProsodyResult(segments=(), speakers=(
+        SpeakerProsody(speaker="Me", f0_baseline_hz=120.0, f0_variability_st=2.0,
+                       energy_mean_db=-44.0, energy_dynamics_db=20.0,
+                       jitter_local=0.02, shimmer_local=0.14,
+                       f0_trend_by_third_st=(0.0, 0.0, 0.0)),
+        SpeakerProsody(speaker="SPEAKER_00", f0_baseline_hz=200.0, f0_variability_st=2.0,
+                       energy_mean_db=-28.0, energy_dynamics_db=15.0,
+                       jitter_local=0.02, shimmer_local=0.14,
+                       f0_trend_by_third_st=(0.0, 0.0, 0.0)),
+    ))
+
+    dual = render._render_prosody_section(result, "dual-channel+pyannote")
+    assert "not comparable" in dual
+    assert "`Me`" in dual
+
+    mono = render._render_prosody_section(result, "pyannote")
+    assert "not comparable" not in mono

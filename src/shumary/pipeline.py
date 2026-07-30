@@ -55,11 +55,19 @@ class _Progress:
 
     Skipped and cache-hit stages still report `done`, so the percentage always
     advances and never stalls on work that didn't need doing.
+
+    Stages that take real time also report *within* themselves via `substage`,
+    because two stages carry 84% of the weight: without it the percentage sits
+    at 2% for the whole transcription and 72% for the whole diarization, which
+    is indistinguishable from a hang. Sub-stage events are throttled to whole
+    percent changes and can never reach the next stage's boundary, so the number
+    only ever moves forward.
     """
 
     def __init__(self, sink: ProgressSink | None) -> None:
         self._sink = sink
         self._completed = 0.0
+        self._last_pct = -1
 
     def start(self, stage: str) -> None:
         self._emit({"event": "stage", "stage": stage, "status": "start"})
@@ -68,6 +76,19 @@ class _Progress:
         self._completed = min(1.0, self._completed + STAGE_WEIGHTS.get(stage, 0.0))
         self._emit({"event": "stage", "stage": stage, "status": "done"})
 
+    def substage(self, stage: str, fraction: float) -> None:
+        """Report `fraction` (0..1) of the way through `stage`."""
+        if self._sink is None:
+            return
+        weight = STAGE_WEIGHTS.get(stage, 0.0)
+        if weight <= 0:
+            return
+        fraction = max(0.0, min(1.0, fraction))
+        pct = self._completed + weight * fraction
+        if int(pct * 100) <= self._last_pct:
+            return  # throttle: nothing new to say at whole-percent resolution
+        self._emit({"event": "stage", "stage": stage, "status": "progress"}, pct=pct)
+
     def finished(self, output: Path) -> None:
         self._completed = 1.0
         self._emit({"event": "done", "output": str(output)})
@@ -75,10 +96,12 @@ class _Progress:
     def failed(self, message: str) -> None:
         self._emit({"event": "error", "message": message})
 
-    def _emit(self, payload: dict) -> None:
+    def _emit(self, payload: dict, pct: float | None = None) -> None:
         if self._sink is None:
             return
-        self._sink(payload | {"pct": round(self._completed, 4)})
+        value = self._completed if pct is None else pct
+        self._last_pct = max(self._last_pct, int(value * 100))
+        self._sink(payload | {"pct": round(value, 4)})
 
 
 def process_file(
@@ -141,7 +164,10 @@ def process_file(
     prog.start("transcribe")
     transcription = _run_timed_stage(
         timings, "transcribe", slug, "whisper", force,
-        compute=lambda: transcribe_stage.run(wav, model_name, fast=fast, backend=backend),
+        compute=lambda: transcribe_stage.run(
+            wav, model_name, fast=fast, backend=backend,
+            progress=lambda f: prog.substage("transcribe", f),
+        ),
         serialize=lambda r: r.to_dict(),
         deserialize=TranscriptionResult.from_dict,
     )
@@ -165,10 +191,13 @@ def process_file(
         if channels:
             left, right = channels
             compute_diarization = lambda: diarize_stage.run_dual(  # noqa: E731
-                left, right, mic_label=mic_label or recorder.MIC_LABEL
+                left, right, mic_label=mic_label or recorder.MIC_LABEL,
+                progress=lambda f: prog.substage("diarize", f),
             )
         else:
-            compute_diarization = lambda: diarize_stage.run(wav)  # noqa: E731
+            compute_diarization = lambda: diarize_stage.run(  # noqa: E731
+                wav, progress=lambda f: prog.substage("diarize", f)
+            )
 
         diarization = _run_timed_stage(
             timings, "diarize", slug, "diarize", force,
@@ -180,10 +209,10 @@ def process_file(
         diarize_backend = diarization.backend if diarization else None
 
     prog.done("diarize")
-    speaker_stats: SpeakerStats | None = diarize_stage.speaker_stats(turns)
-    if speaker_stats:
-        for s in speaker_stats.speakers:
-            print(f"  {s.label}: {fmt_duration(s.duration_sec)} ({s.pct}%)")
+    turn_stats: SpeakerStats | None = diarize_stage.speaker_stats(turns)
+    if turn_stats:
+        for s in turn_stats.speakers:
+            print(f"  {s.label}: {fmt_duration(s.duration_sec)} audible")
     else:
         print("  (no speaker data)")
 
@@ -203,12 +232,42 @@ def process_file(
     prog.done("align")
     print(f"  {len(aligned)} segments")
 
+    # The speaker table and every turn-derived metric are both computed from
+    # *speech*, not from raw turns: an energy-gated mic turn that caught a
+    # keyboard press is only distinguishable from a real one once alignment has
+    # decided where the words went.
+    speaker_stats: SpeakerStats | None = (
+        diarize_stage.speaker_stats_from_speech(aligned) or turn_stats
+    )
+    if speaker_stats:
+        for s in speaker_stats.speakers:
+            print(f"  {s.label}: {fmt_duration(s.duration_sec)} ({s.pct}%)")
+        if turn_stats:
+            kept = {s.label for s in speaker_stats.speakers}
+            for s in sorted(turn_stats.speakers, key=lambda s: s.label):
+                if s.label not in kept:
+                    print(f"  {s.label}: too little transcribed speech — not a speaker")
+
+    # The single set of labels that count as participants. Every per-speaker
+    # table — speakers, turn metrics, mood, prosody — is built from it, so they
+    # cannot disagree about who was in the meeting.
+    accepted_speakers = (
+        {s.label for s in speaker_stats.speakers} if speaker_stats else None
+    )
+
+    pruned = diarize_stage.prune_unvoiced_turns(
+        turns, aligned, keep_labels=accepted_speakers,
+    )
+    if turns and pruned is not None and len(pruned) < len(turns):
+        print(f"  {len(turns) - len(pruned)} of {len(turns)} turns carried no speech — excluded from metrics")
+    turns = pruned
+
     # ── 4. Mood analysis ───────────────────────────────────────────────────────
     _step(4, "Behavioral / Mood Analysis")
     prog.start("mood")
     mood = _run_timed_stage(
         timings, "mood", slug, "mood", force,
-        compute=lambda: mood_stage.run(aligned, transcription.language),
+        compute=lambda: mood_stage.run(aligned, transcription.language, accepted_speakers),
         serialize=lambda m: m.to_dict(),
         deserialize=MoodSignals.from_dict,
     )
@@ -250,7 +309,7 @@ def process_file(
     else:
         prosody = _run_timed_stage(
             timings, "prosody", slug, "prosody", force,
-            compute=lambda: prosody_stage.run(wav, aligned),
+            compute=lambda: prosody_stage.run(wav, aligned, accepted_speakers),
             serialize=lambda p: p.to_dict(),
             deserialize=ProsodyResult.from_dict,
         )

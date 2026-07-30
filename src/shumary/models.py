@@ -315,13 +315,18 @@ class MoodSignals:
     rate_variability: float | None
     long_pauses: int
     long_pause_details: tuple[PauseDetail, ...]
-    filler_word_count: int
+    filler_word_count: int          # hesitations + discourse_markers, combined
     top_fillers: tuple[str, ...]
     repeated_phrases: tuple[str, ...]
     low_confidence_segments: int
     near_silence_segments: int
     inferred_state: str
     per_speaker: tuple[SpeakerMood, ...] = ()
+    # Split out because they support different claims: hesitations are evidence
+    # of load, discourse markers are evidence of conversational style. Defaulted
+    # so cache entries written before the split still deserialize.
+    hesitations: int = 0
+    discourse_markers: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return to_dict_helper(self)

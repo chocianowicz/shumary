@@ -146,7 +146,7 @@ def _build_document(
         parts.append(_render_interaction_section(interaction))
 
     if prosody is not None and prosody.speakers:
-        parts.append(_render_prosody_section(prosody))
+        parts.append(_render_prosody_section(prosody, diarize_backend))
 
     parts.append(_render_transcript_body(segments))
 
@@ -484,8 +484,17 @@ def _render_interaction_section(interaction: InteractionMetrics) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _render_prosody_section(prosody: ProsodyResult) -> str:
+def _render_prosody_section(
+    prosody: ProsodyResult, diarize_backend: str | None = None
+) -> str:
     speakers = prosody.speakers
+    # In dual-channel mode exactly one label comes from the mic channel, and it
+    # is the one that is not an anonymous `SPEAKER_NN` from clustering.
+    mic_label = next(
+        (sp.speaker for sp in speakers
+         if sp.speaker and not re.fullmatch(r"SPEAKER_(\d+|\?\?)", sp.speaker)),
+        None,
+    )
     lines = [
         "---\n",
         "## Voice / Prosody\n",
@@ -494,6 +503,18 @@ def _render_prosody_section(prosody: ProsodyResult) -> str:
         "> These are **descriptive acoustics, not emotional diagnoses**. All "
         "inferences are **(uncertain)**.\n",
     ]
+
+    # On a two-channel recording the mic and the system side arrive through
+    # different capture paths at different gains, so an energy difference between
+    # them measures the recording chain rather than the speaker. Pitch and voice
+    # quality are per-voice and unaffected.
+    if diarize_backend and diarize_backend.startswith("dual-channel"):
+        who = f"`{mic_label}`" if mic_label else "the mic speaker"
+        lines.append(
+            f"> ⚠ **Energy is not comparable between {who} and the remote speakers** "
+            "— they were captured on separate channels at different gains. Compare "
+            "energy only within a channel; pitch, jitter and shimmer are unaffected.\n"
+        )
 
     header = "| Signal | " + " | ".join(f"`{sp.speaker}`" for sp in speakers) + " |"
     sep = "|--------|" + "|".join("------" for _ in speakers) + "|"

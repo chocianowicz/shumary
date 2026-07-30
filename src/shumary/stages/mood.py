@@ -6,6 +6,8 @@ from collections import Counter
 from functools import lru_cache
 
 from shumary.config import (
+    DISCOURSE_MARKER_HIGH,
+    HESITATION_HIGH,
     LONG_PAUSE_SEC,
     LOW_CONF_THRESHOLD,
     HIGH_SILENCE_PROB,
@@ -24,25 +26,40 @@ _STOPWORDS = frozenset({
 })
 
 
-def run(segments: list[AlignedSegment], language: str) -> MoodSignals:
+def run(
+    segments: list[AlignedSegment],
+    language: str,
+    speakers: set[str] | None = None,
+) -> MoodSignals:
+    """Global and per-speaker mood signals.
+
+    `speakers`, when given, restricts the *per-speaker* breakdown to labels that
+    qualified as participants. Global figures still cover all transcribed text —
+    a disqualified label's words are in the transcript either way, so excluding
+    them from the totals would make the totals disagree with what you can read.
+    """
     text_lower = " ".join(s.text for s in segments).lower()
 
     pauses, pause_details = _detect_pauses(segments)
     rate, variability = _speaking_rate(segments)
-    filler_count, top_fillers = _count_fillers(text_lower, language)
+    hesitations, markers, top_fillers = _count_fillers_split(text_lower)
     repeated = _detect_repetitions(text_lower)
     low_conf = _low_confidence_segments(segments)
     near_sil = _near_silence_segments(segments)
-    state = _infer_state(rate, variability, pauses, filler_count, len(repeated), low_conf, near_sil)
+    state = _infer_state(
+        rate, variability, pauses, hesitations, markers, len(repeated), low_conf, near_sil
+    )
 
-    per_speaker = _per_speaker_moods(segments)
+    per_speaker = _per_speaker_moods(segments, speakers)
 
     return MoodSignals(
         avg_speaking_rate_wps=rate,
         rate_variability=variability,
         long_pauses=pauses,
         long_pause_details=tuple(pause_details[:5]),
-        filler_word_count=filler_count,
+        filler_word_count=hesitations + markers,
+        hesitations=hesitations,
+        discourse_markers=markers,
         top_fillers=tuple(top_fillers[:5]),
         repeated_phrases=tuple(repeated[:10]),
         low_confidence_segments=low_conf,
@@ -54,7 +71,9 @@ def run(segments: list[AlignedSegment], language: str) -> MoodSignals:
 
 # ── Per-speaker signals (Spec 5 / 5.1) ──────────────────────────────────────────
 
-def _per_speaker_moods(segments: list[AlignedSegment]) -> tuple[SpeakerMood, ...]:
+def _per_speaker_moods(
+    segments: list[AlignedSegment], accepted: set[str] | None = None
+) -> tuple[SpeakerMood, ...]:
     """Compute per-speaker mood signals.
 
     Returns an empty tuple when speaker labels are absent (e.g. diarization
@@ -62,6 +81,8 @@ def _per_speaker_moods(segments: list[AlignedSegment]) -> tuple[SpeakerMood, ...
     recordings get their signal from the global fields only.
     """
     speakers = {s.speaker for s in segments if s.speaker is not None}
+    if accepted is not None:
+        speakers &= accepted
     if len(speakers) < 2:
         return ()
 
@@ -161,8 +182,10 @@ def _infer_speaker_state(
     if intra_pauses >= 4:
         signals.append("frequent long pauses")
 
-    if (hesitations + discourse_markers) >= 15:
-        signals.append("high filler word count — cognitive load or discomfort")
+    if hesitations >= HESITATION_HIGH:
+        signals.append("frequent hesitations — cognitive load or discomfort")
+    if discourse_markers >= DISCOURSE_MARKER_HIGH:
+        signals.append("frequent discourse markers — conversational style, not distress")
 
     if repetitions >= 5:
         signals.append("repeated phrases — thought loops or emphasis")
@@ -297,7 +320,8 @@ def _infer_state(
     rate: float | None,
     variability: float | None,
     pauses: int,
-    fillers: int,
+    hesitations: int,
+    discourse_markers: int,
     repetitions: int,
     low_conf: int,
     near_sil: int,
@@ -313,8 +337,10 @@ def _infer_state(
     if pauses >= 4:
         signals.append("frequent long pauses")
 
-    if fillers >= 15:
-        signals.append("high filler word count — cognitive load or discomfort")
+    if hesitations >= HESITATION_HIGH:
+        signals.append("frequent hesitations — cognitive load or discomfort")
+    if discourse_markers >= DISCOURSE_MARKER_HIGH:
+        signals.append("frequent discourse markers — conversational style, not distress")
 
     if repetitions >= 5:
         signals.append("repeated phrases — thought loops or emphasis")

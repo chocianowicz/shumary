@@ -37,8 +37,16 @@ def available() -> bool:
     return True
 
 
-def run(wav: Path, segments: list[AlignedSegment]) -> ProsodyResult | None:
+def run(
+    wav: Path,
+    segments: list[AlignedSegment],
+    speakers: set[str] | None = None,
+) -> ProsodyResult | None:
     """Extract per-segment prosody features and per-speaker aggregates.
+
+    `speakers`, when given, restricts the per-speaker aggregates to labels that
+    qualified as participants, so the prosody table cannot list a speaker the
+    transcript header has already discounted.
 
     Returns `None` (with a printed warning) if `librosa` or
     `praat-parselmouth` are not installed.
@@ -62,8 +70,13 @@ def run(wav: Path, segments: list[AlignedSegment]) -> ProsodyResult | None:
         if (seg.end - seg.start) >= PROSODY_MIN_SEGMENT_SEC
     ]
 
-    speaker_aggs = _aggregate_per_speaker(prosody_segments)
+    agg_input = prosody_segments
+    if speakers is not None:
+        agg_input = [p for p in prosody_segments if p.speaker in speakers]
+    speaker_aggs = _aggregate_per_speaker(agg_input)
 
+    # Per-segment features are kept for every segment regardless: they annotate
+    # the transcript, and the transcript still contains those words.
     return ProsodyResult(segments=tuple(prosody_segments), speakers=speaker_aggs)
 
 

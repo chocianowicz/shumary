@@ -43,8 +43,22 @@ SOLO_SILHOUETTE: float = 0.2118
 DUAL_FRAME_SEC: float = 0.03
 DUAL_HOP_SEC: float = 0.01
 
-# The mic must exceed its own noise floor by this much to count as speech.
+# The mic must exceed its own noise floor by this much to *stay* in a turn.
 DUAL_SPEECH_MARGIN_DB: float = 10.0
+
+# ...but a turn is only admitted if it also clears this higher bar somewhere
+# inside it, and holds it for DUAL_MIN_ONSET_SEC. Two thresholds rather than one
+# because the release margin above is easy to clear with things that are not
+# speech: on a headset in a quiet room the noise floor sits near silence, so
+# breathing, a fan, or a keypress all pass +10 dB. Sustained speech does not just
+# cross that line, it stays well above it — while a keystroke is a spike a few
+# tens of milliseconds wide.
+#
+# Deliberately low enough that short backchannel ("mhm", "да", "ok") is kept:
+# those are quiet but they are still voiced, and they are what makes the
+# turn-taking and response-latency metrics mean anything.
+DUAL_ONSET_MARGIN_DB: float = 18.0
+DUAL_MIN_ONSET_SEC: float = 0.06
 
 # ...and must also exceed the system channel by this much, which is what rejects
 # speaker bleed: audio played out loud and picked up by the mic arrives
@@ -59,6 +73,17 @@ DUAL_MIN_SPEECH_SEC: float = 0.25
 
 # Percentile of the mic's RMS envelope treated as its noise floor.
 DUAL_NOISE_FLOOR_PCT: float = 20.0
+
+# Total transcribed speech a label needs before it is reported as a participant.
+# Diarization occasionally emits a cluster holding a single low-confidence word;
+# presenting that as an extra person corrupts the speaker count, which is the
+# headline figure of the whole transcript. Real participants clear this by orders
+# of magnitude — on a measured 47-minute five-person call the quietest genuine
+# speaker held 3m 36s while the phantom cluster held 1.4s.
+#
+# Someone who truly said only a word or two is dropped from the speaker table,
+# which is the intended trade: their words stay in the transcript either way.
+MIN_SPEAKER_SPEECH_SEC: float = 2.0
 
 # A system channel whose peak never clears this (relative to full scale) is
 # treated as silent — nothing was playing, so there is no remote side.
@@ -131,6 +156,17 @@ PROSODY_MIN_VOICED_FRAMES: int = 10
 # are always merged regardless of the detected language — see mood.py's
 # `_filler_pattern` / `_hesitation_pattern` / `_discourse_marker_pattern`.
 
+# Thresholds for the two filler signals. They are deliberately different kinds
+# of claim: hesitations carry the "cognitive load or discomfort" reading, while
+# discourse markers are reported as *style* and never as distress.
+#
+# A merged threshold made the verdict trivially reachable in Russian and Polish,
+# where the marker lexicons are ordinary conversational vocabulary — a measured
+# 47-minute Russian call scored 0 hesitations and 271 markers, and was reported
+# as showing discomfort purely on the strength of ordinary speech.
+HESITATION_HIGH: int = 15
+DISCOURSE_MARKER_HIGH: int = 40
+
 HESITATIONS: dict[str, set[str]] = {
     "en": {
         "uh", "um", "uhh", "umm", "er", "err", "hmm", "hm", "ugh",
@@ -147,8 +183,16 @@ DISCOURSE_MARKERS: dict[str, set[str]] = {
     "en": {
         "like", "basically", "literally", "actually", "you know",
     },
+    # Inclusion criterion: the word must *predominantly* function as a filler in
+    # speech. A high-frequency function word fails it even though it can be used
+    # as a filler, because the false positives swamp the real ones.
+    #
+    # `это` was removed for exactly that reason: it is an ordinary demonstrative
+    # pronoun ("this"), and on a measured Russian call it alone accounted for 138
+    # of 271 marker hits — over half the signal from one of the most common words
+    # in the language.
     "ru": {
-        "ну", "вот", "это", "значит", "короче",
+        "ну", "вот", "значит", "короче",
         "как бы", "типа", "собственно", "в общем",
     },
     "pl": {

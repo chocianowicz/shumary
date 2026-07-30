@@ -205,9 +205,11 @@ final class Controller {
         currentJob = engine.transcribe(
             folder: folder,
             audio: audio,
-            onProgress: { [weak self] pct in
+            onProgress: { [weak self] pct, stage in
                 guard let self, !self.recorder.isRecording else { return }
-                self.state.activity = .transcribing(session: folder.lastPathComponent, pct: pct)
+                self.state.activity = .transcribing(
+                    session: folder.lastPathComponent, pct: pct, stage: stage
+                )
             },
             onFinish: { [weak self] result in
                 guard let self else { return }

@@ -111,8 +111,15 @@ def test_hesitation_pattern_matches_pure_fillers():
 
 def test_discourse_marker_pattern_matches_lexical_fillers():
     pattern = mood._discourse_marker_pattern()
-    for word in ("like", "you know", "ну", "вот", "это", "короче", "типа", "как бы", "no", "właśnie", "jakby", "znaczy"):
+    for word in ("like", "you know", "ну", "вот", "короче", "типа", "как бы", "no", "właśnie", "jakby", "znaczy"):
         assert pattern.search(word), f"{word!r} should match discourse marker pattern"
+
+
+def test_high_frequency_function_words_are_not_discourse_markers():
+    """`это` is an ordinary demonstrative pronoun. On a real Russian call it was
+    138 of 271 marker hits, over half the signal from one very common word."""
+    pattern = mood._discourse_marker_pattern()
+    assert not pattern.search("это")
 
 
 def test_count_fillers_split_separates_hesitations_and_markers():
@@ -298,3 +305,50 @@ def test_mood_signals_with_per_speaker_roundtrip():
     restored = MoodSignals.from_dict(d)
     assert restored == result
     assert len(restored.per_speaker) == 2
+
+
+# ── the filler verdict rests on hesitations, not on ordinary words ─────────────
+
+def _seg_text(text, speaker="SPEAKER_00", start=0.0, end=10.0):
+    from shumary.models import AlignedSegment
+    return AlignedSegment(start=start, end=end, text=text, avg_logprob=-0.2,
+                          no_speech_prob=0.05, speaker=speaker)
+
+
+def test_many_discourse_markers_do_not_imply_discomfort():
+    """The failure this guards: a Russian call with zero hesitations was reported
+    as showing "cognitive load or discomfort" purely from ordinary speech."""
+    text = " ".join(["ну вот значит короче типа"] * 20)   # 100 markers, 0 hesitations
+    m = mood.run([_seg_text(text)], "ru")
+
+    assert m.hesitations == 0
+    assert m.discourse_markers >= 40
+    assert "discomfort" not in m.inferred_state
+    assert "conversational style" in m.inferred_state
+
+
+def test_many_hesitations_do_imply_load():
+    text = " ".join(["uh um er"] * 10)   # 30 hesitations
+    m = mood.run([_seg_text(text)], "en")
+
+    assert m.hesitations >= 15
+    assert "frequent hesitations — cognitive load or discomfort" in m.inferred_state
+
+
+def test_filler_word_count_still_reports_the_combined_total():
+    m = mood.run([_seg_text("uh ну вот")], "ru")
+    assert m.filler_word_count == m.hesitations + m.discourse_markers
+
+
+def test_per_speaker_breakdown_restricted_to_accepted_speakers():
+    """A label disqualified from the speaker table must not reappear here."""
+    segs = [
+        _seg_text("hello there friends", "SPEAKER_00", 0.0, 5.0),
+        _seg_text("yes indeed quite so", "SPEAKER_01", 5.0, 10.0),
+        _seg_text("ага", "SPEAKER_02", 10.0, 11.4),
+    ]
+    m = mood.run(segs, "en", {"SPEAKER_00", "SPEAKER_01"})
+
+    assert {s.speaker for s in m.per_speaker} == {"SPEAKER_00", "SPEAKER_01"}
+    # Global text stats still cover every transcribed word.
+    assert m.avg_speaking_rate_wps is not None
