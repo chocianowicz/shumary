@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from shumary.models import AlignedSegment, DiarizationResult, Turn
 from shumary.stages import diarize
 
@@ -351,3 +353,55 @@ def test_prune_unvoiced_turns_drops_turns_of_disqualified_labels():
 
     kept = diarize.prune_unvoiced_turns(turns, aligned, keep_labels={"SPEAKER_00"})
     assert [t.speaker for t in kept] == ["SPEAKER_00"]
+
+
+# ── pyannote progress hook ─────────────────────────────────────────────────────
+#
+# pyannote reports per internal step (segmentation, embeddings, clustering) and
+# each step restarts its own counter, so the adapter has to fold several 0→1
+# runs into one advancing fraction.
+
+def test_pyannote_progress_advances_across_steps():
+    seen: list[float] = []
+    hook = diarize._PyannoteProgress(seen.append)
+
+    hook("segmentation", None, total=10, completed=5)    # half of step 1 of 3
+    hook("embeddings", None, total=10, completed=10)     # all of step 2 of 3
+    hook("clustering", None, total=4, completed=2)       # half of step 3 of 3
+
+    assert seen[0] == pytest.approx(0.5 / 3, abs=0.01)
+    assert seen[1] == pytest.approx(2.0 / 3, abs=0.01)
+    assert seen[2] == pytest.approx(2.5 / 3, abs=0.01)
+    assert seen == sorted(seen)
+
+
+def test_pyannote_progress_handles_steps_without_counters():
+    """Some steps report no total — they still mark step boundaries."""
+    seen: list[float] = []
+    hook = diarize._PyannoteProgress(seen.append)
+
+    hook("segmentation", None)
+    hook("embeddings", None, total=None, completed=None)
+
+    assert seen == [pytest.approx(0.0), pytest.approx(1 / 3, abs=0.01)]
+
+
+def test_pyannote_progress_never_exceeds_one():
+    seen: list[float] = []
+    hook = diarize._PyannoteProgress(seen.append)
+    for i, step in enumerate(["a", "b", "c", "d", "e"]):
+        hook(step, None, total=10, completed=10)
+
+    assert max(seen) <= 1.0
+
+
+def test_pyannote_progress_never_raises_on_bad_input():
+    """A broken hook must not take diarization down with it."""
+    hook = diarize._PyannoteProgress(lambda f: None)
+    hook("step", None, total=0, completed=5)        # division by zero
+    hook("step", None, total="nonsense", completed=None)
+
+    def _boom(_f):
+        raise RuntimeError("sink exploded")
+
+    diarize._PyannoteProgress(_boom)("step", None, total=10, completed=1)

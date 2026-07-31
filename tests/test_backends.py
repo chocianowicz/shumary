@@ -495,3 +495,80 @@ def test_faster_backend_does_not_apply_post_filter(monkeypatch):
 
     assert len(result.segments) == 2  # not filtered
     assert result.hallucinations_filtered == 0
+
+
+# ── tqdm progress redirect ────────────────────────────────────────────────────
+#
+# mlx-whisper and openai-whisper expose no progress callback; both drive a tqdm
+# counter internally, and redirecting it is the only real progress signal they
+# offer. These tests stand in for that library code with a plain tqdm user.
+
+def test_tqdm_reporter_forwards_updates_as_fractions():
+    seen: list[float] = []
+    with backends._tqdm_reporter(seen.append):
+        import tqdm
+        with tqdm.tqdm(total=10) as bar:
+            for _ in range(10):
+                bar.update(1)
+
+    assert seen[0] == pytest.approx(0.1)
+    assert seen[-1] == pytest.approx(1.0)
+    assert seen == sorted(seen), "fractions must never go backwards"
+
+
+def test_tqdm_reporter_draws_nothing():
+    """The bar must not be rendered: stderr carries the JSON progress stream,
+    and a half-drawn bar interleaved with it would corrupt the events the app
+    parses."""
+    import io as _io
+    import contextlib
+
+    err = _io.StringIO()
+    with contextlib.redirect_stderr(err):
+        with backends._tqdm_reporter(lambda f: None):
+            import tqdm
+            with tqdm.tqdm(total=4) as bar:
+                bar.update(4)
+
+    assert err.getvalue() == ""
+
+
+def test_tqdm_reporter_restores_the_real_tqdm():
+    import tqdm
+    original = tqdm.tqdm
+
+    with backends._tqdm_reporter(lambda f: None):
+        assert tqdm.tqdm is not original
+
+    assert tqdm.tqdm is original
+
+
+def test_tqdm_reporter_restores_even_when_the_body_raises():
+    import tqdm
+    original = tqdm.tqdm
+
+    with pytest.raises(ValueError):
+        with backends._tqdm_reporter(lambda f: None):
+            raise ValueError("transcription blew up")
+
+    assert tqdm.tqdm is original
+
+
+def test_tqdm_reporter_without_a_sink_leaves_tqdm_alone():
+    import tqdm
+    original = tqdm.tqdm
+
+    with backends._tqdm_reporter(None):
+        assert tqdm.tqdm is original
+
+
+def test_tqdm_reporter_survives_a_failing_sink():
+    """Progress reporting must never take down a transcription."""
+    def _boom(_fraction):
+        raise RuntimeError("sink exploded")
+
+    with backends._tqdm_reporter(_boom):
+        import tqdm
+        with tqdm.tqdm(total=2) as bar:
+            bar.update(1)
+            bar.update(1)

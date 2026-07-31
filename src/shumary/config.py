@@ -154,7 +154,7 @@ PROSODY_MIN_VOICED_FRAMES: int = 10
 #
 # Per finding B7 (mixed-language recordings), all three languages (en, ru, pl)
 # are always merged regardless of the detected language — see mood.py's
-# `_filler_pattern` / `_hesitation_pattern` / `_discourse_marker_pattern`.
+# `_hesitation_pattern` / `_discourse_marker_pattern`.
 
 # Thresholds for the two filler signals. They are deliberately different kinds
 # of claim: hesitations carry the "cognitive load or discomfort" reading, while
@@ -201,10 +201,6 @@ DISCOURSE_MARKERS: dict[str, set[str]] = {
     },
 }
 
-# Backward/continuity alias: global `filler_word_count` keeps meaning
-# hesitations + discourse markers combined. Some code/tests may still refer
-# to the merged lexicon by language.
-FILLER_WORDS: dict[str, set[str]] = {
-    lang: HESITATIONS.get(lang, set()) | DISCOURSE_MARKERS.get(lang, set())
-    for lang in set(HESITATIONS) | set(DISCOURSE_MARKERS)
-}
+# `filler_word_count` still means hesitations + discourse markers combined; it
+# is summed at the call site from the two counts rather than from a merged
+# lexicon, so the two categories can also be reported separately.

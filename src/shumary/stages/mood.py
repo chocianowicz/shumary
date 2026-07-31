@@ -14,7 +14,6 @@ from shumary.config import (
     SLOW_RATE,
     FAST_RATE,
     BASELINE_RATE,
-    FILLER_WORDS,
     HESITATIONS,
     DISCOURSE_MARKERS,
 )
@@ -244,20 +243,6 @@ def _compile_alternation(fillers: set[str]) -> re.Pattern:
 
 
 @lru_cache(maxsize=1)
-def _filler_pattern(language: str = "") -> re.Pattern:
-    """Compile one alternation regex for all fillers across en+ru+pl.
-
-    Per finding B7 (mixed-language recordings code-switch), all three
-    languages are always merged regardless of the detected `language`
-    argument — kept for backward-compatible call sites/tests.
-    """
-    fillers: set[str] = set()
-    for lexicon in FILLER_WORDS.values():
-        fillers |= lexicon
-    return _compile_alternation(fillers)
-
-
-@lru_cache(maxsize=1)
 def _hesitation_pattern() -> re.Pattern:
     fillers: set[str] = set()
     for lexicon in HESITATIONS.values():
@@ -271,15 +256,6 @@ def _discourse_marker_pattern() -> re.Pattern:
     for lexicon in DISCOURSE_MARKERS.values():
         fillers |= lexicon
     return _compile_alternation(fillers)
-
-
-def _count_fillers(text_lower: str, language: str) -> tuple[int, list[str]]:
-    """Global filler count — hesitations + discourse markers combined
-    (continuity with the pre-Phase-5 `filler_word_count` meaning)."""
-    pattern = _filler_pattern()
-    counter: Counter[str] = Counter(pattern.findall(text_lower))
-    top = [f"{word} ×{count}" for word, count in counter.most_common(5)]
-    return sum(counter.values()), top
 
 
 def _count_fillers_split(text_lower: str) -> tuple[int, int, list[str]]:

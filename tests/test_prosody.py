@@ -274,3 +274,50 @@ def test_per_speaker_aggregates_restricted_to_accepted_speakers(monkeypatch):
     aggs = prosody._aggregate_per_speaker([p for p in made if p.speaker in accepted])
 
     assert {a.speaker for a in aggs} == accepted
+
+
+# ── the audio is decoded once, not once per segment ───────────────────────────
+
+def test_sound_is_loaded_once_for_the_whole_recording(tmp_path, monkeypatch):
+    """Constructing the Sound re-decodes the entire file. Doing it per segment
+    cost ~37s on a 47-minute recording, and got worse with length."""
+    import parselmouth
+
+    wav = _make_voice_wav(tmp_path / "audio.wav", duration=6.0)
+    loads = []
+    real_sound = parselmouth.Sound
+
+    def _counting_sound(path, *args, **kwargs):
+        loads.append(path)
+        return real_sound(path, *args, **kwargs)
+
+    monkeypatch.setattr(parselmouth, "Sound", _counting_sound)
+
+    segments = [
+        AlignedSegment(start=float(i), end=float(i) + 1.0, text="word",
+                       avg_logprob=-0.2, no_speech_prob=0.05, speaker="SPEAKER_00")
+        for i in range(5)
+    ]
+    result = prosody.run(wav, segments)
+
+    assert result is not None
+    assert len(loads) == 1, f"expected one decode, got {len(loads)}"
+
+
+def test_load_sound_returns_none_for_unreadable_audio(tmp_path):
+    import parselmouth
+
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not a wav at all")
+
+    assert prosody._load_sound(parselmouth, bad) is None
+
+
+def test_voice_quality_omitted_when_the_recording_would_not_load():
+    """A file parselmouth cannot open drops jitter/shimmer for every segment
+    rather than failing the stage — the same shape as the old per-segment
+    failure, just decided once."""
+    seg = AlignedSegment(start=0.0, end=1.0, text="word", avg_logprob=-0.2,
+                         no_speech_prob=0.05, speaker="SPEAKER_00")
+
+    assert prosody._voice_quality_features(None, None, seg) == (None, None)

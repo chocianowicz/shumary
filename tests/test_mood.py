@@ -74,8 +74,13 @@ def test_serialisation_roundtrip(sample_mood):
 # ── filler regex ordering (1.7 / A5) ─────────────────────────────────────────────
 
 def test_multiword_filler_no_to_beats_no():
-    """'no to' must match as a whole, not be shadowed by the shorter 'no'."""
-    pattern = mood._filler_pattern("pl")
+    """'no to' must match as a whole, not be shadowed by the shorter 'no'.
+
+    Asserted against the pattern the pipeline actually uses — both `no` and
+    `no to` live in the discourse-marker lexicon, so this is where the
+    longest-alternative-first ordering has to hold.
+    """
+    pattern = mood._discourse_marker_pattern()
     matches = pattern.findall("no to zaczynamy")
     assert "no to" in matches
     assert "no" not in matches

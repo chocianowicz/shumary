@@ -64,8 +64,16 @@ def run(
 
     y, sr = librosa.load(str(wav), sr=16000)
 
+    # Decoded once, then sliced per segment. Constructing the Sound re-reads and
+    # re-decodes the whole recording, which costs ~53 ms on a 47-minute file
+    # against ~0.01 ms for the slice — doing it inside the loop spent about 33
+    # seconds per run re-loading audio that had not changed, and got worse with
+    # length, since a longer file is both slower to load and split into more
+    # segments.
+    sound = _load_sound(parselmouth, wav)
+
     prosody_segments = [
-        _extract_segment(librosa, parselmouth, y, sr, wav, seg)
+        _extract_segment(librosa, parselmouth, y, sr, sound, seg)
         for seg in segments
         if (seg.end - seg.start) >= PROSODY_MIN_SEGMENT_SEC
     ]
@@ -82,12 +90,24 @@ def run(
 
 # ── Per-segment extraction ───────────────────────────────────────────────────────
 
-def _extract_segment(librosa, parselmouth, y, sr: int, wav: Path, seg: AlignedSegment) -> ProsodySegment:
+def _load_sound(parselmouth, wav: Path):
+    """The whole recording as one parselmouth Sound, or None if it won't load.
+
+    None keeps prosody running with jitter/shimmer omitted, which is how a
+    single unreadable segment already behaved.
+    """
+    try:
+        return parselmouth.Sound(str(wav))
+    except Exception:
+        return None
+
+
+def _extract_segment(librosa, parselmouth, y, sr: int, sound, seg: AlignedSegment) -> ProsodySegment:
     seg_y = y[int(seg.start * sr):int(seg.end * sr)]
 
     f0_median, f0_range_st = _pitch_features(librosa, seg_y, sr)
     energy_mean_db, energy_range_db = _energy_features(librosa, seg_y)
-    jitter_local, shimmer_local = _voice_quality_features(parselmouth, wav, seg)
+    jitter_local, shimmer_local = _voice_quality_features(parselmouth, sound, seg)
 
     return ProsodySegment(
         start=seg.start,
@@ -125,9 +145,11 @@ def _energy_features(librosa, seg_y) -> tuple[float, float]:
     return energy_mean_db, energy_range_db
 
 
-def _voice_quality_features(parselmouth, wav: Path, seg: AlignedSegment) -> tuple[float | None, float | None]:
+def _voice_quality_features(parselmouth, sound, seg: AlignedSegment) -> tuple[float | None, float | None]:
+    if sound is None:
+        return None, None
     try:
-        snd = parselmouth.Sound(str(wav)).extract_part(seg.start, seg.end)
+        snd = sound.extract_part(seg.start, seg.end)
         pp = parselmouth.praat.call(snd, "To PointProcess (periodic, cc)", 75, 500)
         jitter = parselmouth.praat.call(pp, "Get jitter (local)", 0, 0, 0.0001, 0.02, 1.3)
         shimmer = parselmouth.praat.call(
