@@ -98,6 +98,13 @@ def transcribe(
             "stereo file, or --no-dual-channel to diarize the mixdown instead."
         ),
     ),
+    language: Optional[str] = typer.Option(
+        None, "--language", "-l",
+        help=(
+            "Force transcription language as an ISO 639-1 code (e.g. 'pl', 'en', 'de'). "
+            "Bypasses Whisper's automatic language detection to prevent misidentification."
+        ),
+    ),
 ) -> None:
     """Transcribe one audio file, or every audio file in a directory."""
     import json
@@ -130,7 +137,8 @@ def transcribe(
     if path.is_dir():
         try:
             _succeeded, failed = pipeline.process_directory(
-                path, force=force, no_diarize=no_diarize, solo=solo, fast=fast, model_name=model,
+                path, force=force, no_diarize=no_diarize, solo=solo, fast=fast,
+                language=language, model_name=model,
                 date_override=date, backend_override=backend, plain_text=plain_text,
                 output_dir=output, dual=dual_channel, progress=progress, write_json=json_transcript,
             )
@@ -144,7 +152,8 @@ def transcribe(
     else:
         try:
             pipeline.process_file(
-                path, force=force, no_diarize=no_diarize, solo=solo, fast=fast, model_name=model,
+                path, force=force, no_diarize=no_diarize, solo=solo, fast=fast,
+                language=language, model_name=model,
                 date_override=date, backend_override=backend, plain_text=plain_text,
                 output=output, dual=dual_channel, progress=progress, write_json=json_transcript,
             )

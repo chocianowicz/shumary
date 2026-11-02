@@ -31,9 +31,10 @@ struct SessionMetadata: Codable {
     var originalFilename: String?
     var error: String?
     var conversion: String?
+    var language: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, source, state, tracks, speakers, error, conversion
+        case id, source, state, tracks, speakers, error, conversion, language
         case startedAt = "started_at"
         case audioFile = "audio_file"
         case dualSource = "dual_source"

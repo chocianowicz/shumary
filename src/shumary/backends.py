@@ -77,6 +77,7 @@ class TranscribeBackend(Protocol):
 
     def transcribe(
         self, wav: Path, model_name: str, *, fast: bool,
+        language: str | None = None,
         progress: ProgressFn | None = None,
     ) -> TranscriptionResult: ...
 
@@ -227,6 +228,7 @@ class OpenaiBackend:
 
     def transcribe(
         self, wav: Path, model_name: str, *, fast: bool,
+        language: str | None = None,
         progress: ProgressFn | None = None,
     ) -> TranscriptionResult:
         from shumary.modelhub import whisper_model
@@ -241,6 +243,8 @@ class OpenaiBackend:
         )
         if fast:
             opts["temperature"] = 0.0
+        if language:
+            opts["language"] = language
 
         with _tqdm_reporter(progress):
             result = model.transcribe(str(wav), **opts)
@@ -284,6 +288,7 @@ class FasterBackend:
 
     def transcribe(
         self, wav: Path, model_name: str, *, fast: bool,
+        language: str | None = None,
         progress: ProgressFn | None = None,
     ) -> TranscriptionResult:
         model = _faster_model(FASTER_MODEL_NAMES.get(model_name, model_name))
@@ -296,6 +301,8 @@ class FasterBackend:
         if fast:
             opts["beam_size"] = 1
             opts["temperature"] = 0.0
+        if language:
+            opts["language"] = language
 
         seg_iter, info = model.transcribe(str(wav), **opts)
 
@@ -353,6 +360,7 @@ class MlxBackend:
 
     def transcribe(
         self, wav: Path, model_name: str, *, fast: bool,
+        language: str | None = None,
         progress: ProgressFn | None = None,
     ) -> TranscriptionResult:
         import mlx_whisper  # type: ignore[import-untyped]
@@ -366,6 +374,8 @@ class MlxBackend:
         )
         if fast:
             opts["temperature"] = 0.0
+        if language:
+            opts["language"] = language
         if progress is not None:
             # mlx-whisper only creates its frame counter when `verbose is False`
             # exactly — the default of None disables it.

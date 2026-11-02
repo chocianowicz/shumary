@@ -111,6 +111,7 @@ def process_file(
     no_diarize: bool = False,
     solo: bool = False,
     fast: bool = False,
+    language: str | None = None,
     model_name: str = WHISPER_MODEL,
     date_override: str | None = None,
     backend_override: str | None = None,
@@ -138,9 +139,9 @@ def process_file(
         dual_source = False
 
     prev_manifest = cache_mod.read_manifest(slug)
-    invalidated = cache_mod.ensure_manifest(slug, audio, model_name, fast, dual_source)
+    invalidated = cache_mod.ensure_manifest(slug, audio, model_name, fast, dual_source, language=language)
     if invalidated:
-        print(f"  ♻️  cache invalidated: {_describe_invalidation(prev_manifest, model_name, fast, dual_source, invalidated)}\n")
+        print(f"  ♻️  cache invalidated: {_describe_invalidation(prev_manifest, model_name, fast, dual_source, invalidated, language=language)}\n")
 
     # ── 0. Pre-decode to 16 kHz mono WAV ──────────────────────────────────────────
     _step(0, "Pre-decode Audio")
@@ -165,7 +166,7 @@ def process_file(
     transcription = _run_timed_stage(
         timings, "transcribe", slug, "whisper", force,
         compute=lambda: transcribe_stage.run(
-            wav, model_name, fast=fast, backend=backend,
+            wav, model_name, fast=fast, language=language, backend=backend,
             progress=lambda f: prog.substage("transcribe", f),
         ),
         serialize=lambda r: r.to_dict(),
@@ -375,6 +376,7 @@ def process_directory(
     no_diarize: bool = False,
     solo: bool = False,
     fast: bool = False,
+    language: str | None = None,
     model_name: str = WHISPER_MODEL,
     date_override: str | None = None,
     backend_override: str | None = None,
@@ -403,7 +405,7 @@ def process_directory(
             succeeded.append(
                 process_file(
                     f, force=force, no_diarize=no_diarize, solo=solo, fast=fast,
-                    model_name=model_name, date_override=date_override,
+                    language=language, model_name=model_name, date_override=date_override,
                     backend_override=backend_override, plain_text=plain_text,
                     output=output_dir, dual=dual, progress=progress, write_json=write_json,
                 )
@@ -469,6 +471,7 @@ def _describe_invalidation(
     fast: bool,
     dual_source: bool,
     invalidated: list[str],
+    language: str | None = None,
 ) -> str:
     """Human-readable summary of why the cache was invalidated."""
     if prev_manifest is None:
@@ -479,6 +482,8 @@ def _describe_invalidation(
         reasons.append(f"model changed {prev_manifest.get('model_name')} → {model_name}")
     if prev_manifest.get("fast") != fast:
         reasons.append(f"--fast changed {prev_manifest.get('fast')} → {fast}")
+    if prev_manifest.get("language") != language:
+        reasons.append(f"language changed {prev_manifest.get('language')!r} → {language!r}")
     if bool(prev_manifest.get("dual_source", False)) != bool(dual_source):
         reasons.append(
             f"dual-source diarization changed "

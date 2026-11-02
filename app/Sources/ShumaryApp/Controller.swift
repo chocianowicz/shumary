@@ -202,9 +202,11 @@ final class Controller {
         SessionStore.update(folder) { $0.state = .transcribing }
         state.activity = .transcribing(session: folder.lastPathComponent, pct: 0)
 
+        let metadata = SessionStore.load(from: folder)
         currentJob = engine.transcribe(
             folder: folder,
             audio: audio,
+            language: metadata?.language,
             onProgress: { [weak self] pct, stage in
                 guard let self, !self.recorder.isRecording else { return }
                 self.state.activity = .transcribing(
@@ -261,6 +263,21 @@ final class Controller {
 
     // ── Import ───────────────────────────────────────────────────────────────
 
+    private static let languageOptions: [(label: String, code: String?)] = [
+        ("Auto-detect", nil),
+        ("Polish (pl)", "pl"),
+        ("English (en)", "en"),
+        ("German (de)", "de"),
+        ("Ukrainian (uk)", "uk"),
+        ("Spanish (es)", "es"),
+        ("French (fr)", "fr"),
+        ("Italian (it)", "it"),
+        ("Portuguese (pt)", "pt"),
+        ("Dutch (nl)", "nl"),
+        ("Russian (ru)", "ru"),
+        ("Other…", "__custom__"),
+    ]
+
     func importRecordings() {
         let panel = NSOpenPanel()
         panel.directoryURL = Paths.inbox
@@ -272,17 +289,74 @@ final class Controller {
         panel.prompt = "Import"
         panel.message = "Choose recordings to transcribe"
 
+        // Language selector accessory view
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 44))
+        let label = NSTextField(labelWithString: "Language:")
+        label.frame = NSRect(x: 10, y: 12, width: 80, height: 20)
+        label.alignment = .right
+        accessory.addSubview(label)
+
+        let popup = NSPopUpButton(frame: NSRect(x: 95, y: 10, width: 230, height: 26), pullsDown: false)
+        for opt in Self.languageOptions {
+            popup.addItem(withTitle: opt.label)
+        }
+
+        let savedLang = UserDefaults.standard.string(forKey: "importLanguage")
+        if let savedLang {
+            if let index = Self.languageOptions.firstIndex(where: { $0.code == savedLang }) {
+                popup.selectItem(at: index)
+            } else {
+                popup.selectItem(at: Self.languageOptions.count - 1)
+            }
+        } else {
+            popup.selectItem(at: 0)
+        }
+        accessory.addSubview(popup)
+        panel.accessoryView = accessory
+
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK else { return }
 
+        var chosenLanguage: String? = nil
+        let selectedIndex = popup.indexOfSelectedItem
+        if selectedIndex >= 0 && selectedIndex < Self.languageOptions.count {
+            let option = Self.languageOptions[selectedIndex]
+            if option.code == "__custom__" {
+                let alert = NSAlert()
+                alert.messageText = "Specify Language"
+                alert.informativeText = "Enter 2-letter language code (e.g. ja, zh, sv, no):"
+                let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 150, height: 24))
+                if let savedLang, !Self.languageOptions.contains(where: { $0.code == savedLang }) {
+                    input.stringValue = savedLang
+                }
+                alert.accessoryView = input
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    let entered = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if !entered.isEmpty {
+                        chosenLanguage = entered
+                    }
+                }
+            } else {
+                chosenLanguage = option.code
+            }
+        }
+
+        if let chosenLanguage {
+            UserDefaults.standard.set(chosenLanguage, forKey: "importLanguage")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "importLanguage")
+        }
+
         for url in panel.urls {
-            importOne(url)
+            importOne(url, language: chosenLanguage)
         }
         state.queueCount = queue.count
         drainQueue()
     }
 
-    private func importOne(_ url: URL) {
+    private func importOne(_ url: URL, language: String? = nil) {
         guard let folder = try? Paths.newSessionFolder() else { return }
 
         // Session-named for the same cache-collision reason as recordings.
@@ -314,7 +388,8 @@ final class Controller {
             startedAt: ISO8601DateFormatter().string(from: Date()),
             audioFile: destination.lastPathComponent,
             dualSource: dualSource,
-            originalFilename: url.lastPathComponent
+            originalFilename: url.lastPathComponent,
+            language: language
         )
         SessionStore.save(metadata, to: folder)
         queue.append(folder)

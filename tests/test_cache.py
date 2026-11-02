@@ -151,6 +151,22 @@ def test_ensure_manifest_fast_flag_change_invalidates_whisper_and_descendants(tm
     assert manifest["fast"] is True
 
 
+def test_ensure_manifest_language_change_invalidates_whisper_and_descendants(tmp_path):
+    audio = tmp_path / "memo.m4a"
+    audio.write_bytes(b"audio-bytes")
+
+    cache_mod.ensure_manifest("slug-lang", audio, "large", False, language=None)
+    cache_mod.write("slug-lang", "whisper", {})
+    cache_mod.write("slug-lang", "align", {})
+    cache_mod.write("slug-lang", "mood", {})
+
+    invalidated = cache_mod.ensure_manifest("slug-lang", audio, "large", False, language="pl")
+
+    assert set(invalidated) == {"whisper", "align", "mood"}
+    manifest = cache_mod.read_manifest("slug-lang")
+    assert manifest["language"] == "pl"
+
+
 def test_ensure_manifest_audio_hash_mismatch_raises(tmp_path):
     audio = tmp_path / "memo.m4a"
     audio.write_bytes(b"original-audio")

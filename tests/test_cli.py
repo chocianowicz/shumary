@@ -96,6 +96,13 @@ def test_transcribe_help_lists_date_option():
     assert "--date" in result.output
 
 
+def test_transcribe_help_lists_language_option():
+    result = runner.invoke(app, ["transcribe", "--help"])
+    assert result.exit_code == 0
+    assert "--language" in result.output
+    assert "-l" in result.output
+
+
 # ── record ─────────────────────────────────────────────────────────────────────
 
 def test_record_help():

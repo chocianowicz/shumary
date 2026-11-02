@@ -12,9 +12,12 @@ def run(
     model_name: str = WHISPER_MODEL,
     *,
     fast: bool = False,
+    language: str | None = None,
     backend: TranscribeBackend | None = None,
     progress=None,
 ) -> TranscriptionResult:
     backend = backend or pick_backend()
     print(f"  backend: {backend.name}")
-    return backend.transcribe(audio, model_name, fast=fast, progress=progress)
+    if language:
+        print(f"  language override: {language}")
+    return backend.transcribe(audio, model_name, fast=fast, language=language, progress=progress)

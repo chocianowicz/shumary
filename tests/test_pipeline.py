@@ -57,7 +57,7 @@ def _patch_pipeline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         pipeline.transcribe_stage, "run",
-        lambda audio, model_name, fast=False, backend=None, progress=None: _fake_transcription(),
+        lambda audio, model_name, fast=False, language=None, backend=None, progress=None: _fake_transcription(),
     )
     monkeypatch.setattr(pipeline, "pick_backend", lambda override=None: None)
     def _fake_align(segments, turns):

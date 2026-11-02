@@ -204,7 +204,8 @@ def read_manifest(slug: str) -> dict[str, Any] | None:
 
 
 def write_manifest(
-    slug: str, *, audio_hash: str, model_name: str, fast: bool, dual_source: bool = False
+    slug: str, *, audio_hash: str, model_name: str, fast: bool, dual_source: bool = False,
+    language: str | None = None,
 ) -> None:
     p = _manifest_path(slug)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -213,6 +214,7 @@ def write_manifest(
         "model_name": model_name,
         "fast": fast,
         "dual_source": dual_source,
+        "language": language,
         "pipeline_version": PIPELINE_VERSION,
         "metrics_version": METRICS_VERSION,
     }
@@ -229,13 +231,16 @@ def fingerprint_info(slug: str) -> str:
     model_name = manifest.get("model_name", "?")
     fast = manifest.get("fast")
     fast_suffix = " --fast" if fast else ""
+    lang = manifest.get("language")
+    lang_suffix = f" [{lang}]" if lang else ""
     audio_hash = manifest.get("audio_hash", "")
     short_hash = audio_hash[:8] if audio_hash else "????????"
-    return f"{model_name}{fast_suffix} · {short_hash}"
+    return f"{model_name}{fast_suffix}{lang_suffix} · {short_hash}"
 
 
 def ensure_manifest(
-    slug: str, audio: Path, model_name: str, fast: bool, dual_source: bool = False
+    slug: str, audio: Path, model_name: str, fast: bool, dual_source: bool = False,
+    language: str | None = None,
 ) -> list[str]:
     """Reconcile the slug's cache manifest against the current run's parameters.
 
@@ -244,7 +249,7 @@ def ensure_manifest(
     - No manifest and no stage files: first contact — just write the manifest.
     - Manifest present, audio hash differs: same slug, different file —
       raise `ShumaryError` (rename the file or clear the cache).
-    - Manifest present, `model_name`/`fast`/`pipeline_version` differ: invalidate
+    - Manifest present, `model_name`/`fast`/`pipeline_version`/`language` differ: invalidate
       the `whisper` stage and its descendants, then update the manifest.
     - Manifest present, `dual_source` differs: invalidate the `diarize` stage and
       its descendants — the same audio diarized per-channel and mixed-down
@@ -272,7 +277,7 @@ def ensure_manifest(
                 done.unlink()
         write_manifest(
             slug, audio_hash=audio_hash, model_name=model_name,
-            fast=fast, dual_source=dual_source,
+            fast=fast, dual_source=dual_source, language=language,
         )
         return invalidated
 
@@ -287,6 +292,7 @@ def ensure_manifest(
         manifest.get("model_name") != model_name
         or manifest.get("fast") != fast
         or manifest.get("pipeline_version") != PIPELINE_VERSION
+        or manifest.get("language") != language
     )
     dual_changed = bool(manifest.get("dual_source", False)) != bool(dual_source)
     # Absent on manifests written before metrics were versioned — treat as v1.
@@ -303,7 +309,7 @@ def ensure_manifest(
                 invalidated += [s for s in invalidate_stage(slug, stage) if s not in invalidated]
         write_manifest(
             slug, audio_hash=audio_hash, model_name=model_name,
-            fast=fast, dual_source=dual_source,
+            fast=fast, dual_source=dual_source, language=language,
         )
         return invalidated
 

@@ -92,6 +92,7 @@ final class Engine {
     func transcribe(
         folder: URL,
         audio: URL,
+        language: String? = nil,
         onProgress: @escaping (Double, String?) -> Void,
         onFinish: @escaping (Result<Void, EngineError>) -> Void
     ) -> Job? {
@@ -102,12 +103,16 @@ final class Engine {
 
         let process = Process()
         process.executableURL = cliPath
-        process.arguments = [
+        var args = [
             "transcribe", audio.path,
             "--progress-json",
             "--json",   // transcript.json alongside transcript.md
             "-o", folder.appendingPathComponent("transcript.md").path,
         ]
+        if let language = language?.trimmingCharacters(in: .whitespacesAndNewlines), !language.isEmpty {
+            args.append(contentsOf: ["--language", language])
+        }
+        process.arguments = args
 
         let stderr = Pipe()
         process.standardError = stderr
