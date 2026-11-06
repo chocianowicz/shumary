@@ -50,3 +50,7 @@ transcripts/*
 # Audio archived here after a successful transcription (inbox-zero).
 processed/*
 !processed/.gitkeep
+
+# Common ignores (added by repo audit 2026-11-06)
+.claude/settings.local.json
+*.log
